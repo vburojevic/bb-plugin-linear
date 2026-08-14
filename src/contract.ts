@@ -512,6 +512,10 @@ export const inboxItemSchema = z.object({
   identifier: z.string().nullable(),
   issueId: z.string().nullable(),
   url: z.string().nullable(),
+  /** The workspace name, only when more than one is connected — a merged
+   *  inbox without labels is a guessing game, and labels on a single
+   *  workspace are noise. */
+  workspace: z.string().nullable(),
   age: z.string(),
   unseen: z.boolean(),
 });

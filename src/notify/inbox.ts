@@ -55,6 +55,8 @@ export interface InboxItemView {
   readonly identifier: string | null;
   readonly issueId: string | null;
   readonly url: string | null;
+  /** Set only when more than one workspace is connected. */
+  readonly workspace: string | null;
   readonly age: string;
   readonly unseen: boolean;
 }
@@ -74,6 +76,10 @@ export function selectInboxItem(input: {
   readonly issue: { readonly identifier: string; readonly title: string } | null;
   readonly blockers: readonly string[];
   readonly now: number;
+  /** The workspace name, only when more than one is connected — naming the
+   *  only workspace on every row is noise, and a merged inbox without labels
+   *  is a guessing game. */
+  readonly workspace?: string | null;
 }): InboxItemView {
   const actor = input.actor?.displayName ?? null;
   const subject =
@@ -119,6 +125,7 @@ export function selectInboxItem(input: {
     identifier: input.issue?.identifier ?? null,
     issueId: input.row.issueId,
     url: input.row.url,
+    workspace: input.workspace ?? null,
     age: formatRelativeCompact(input.row.createdAt, input.now),
     // Unseen means: this bb has not shown it, and Linear does not think it has
     // been read either. Reading it in Linear's own client clears the dot on

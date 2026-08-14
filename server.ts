@@ -2226,6 +2226,15 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         lastFrontendReadAt = now();
         const rows = store.inbox({ limit: 200 });
         const members = new Map(store.members().map((member) => [member.id, member]));
+        // Workspace labels only when there is more than one to tell apart.
+        const workspaces = store.workspaces();
+        const workspaceNameFor =
+          workspaces.length < 2
+            ? () => null
+            : (teamId: string | null): string | null => {
+                if (teamId === null) return null;
+                return store.workspaceForTeam(teamId)?.name ?? null;
+              };
 
         const items = rows.map((row) =>
           selectInboxItem({
@@ -2245,6 +2254,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
                   })(),
             blockers: [],
             now: now(),
+            workspace: workspaceNameFor(row.teamId),
           }),
         );
 

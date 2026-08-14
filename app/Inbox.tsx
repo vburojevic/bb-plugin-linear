@@ -109,6 +109,14 @@ export function InboxSegment() {
               >
                 {item.text}
               </span>
+              {/* Only present with a second workspace connected — a merged
+                  inbox without labels is a guessing game, and labels on a
+                  single workspace are noise. */}
+              {item.workspace !== null ? (
+                <span className="ml-1.5 rounded bg-muted px-1 py-px text-[10px] text-muted-foreground">
+                  {item.workspace}
+                </span>
+              ) : null}
             </button>
 
             {/* The age and the dismiss button share one cell and crossfade,
