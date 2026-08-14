@@ -161,11 +161,11 @@ export function InboxSegment() {
  *  between 100 and 340 has never changed anybody's next action. */
 export function useInboxCount(): number {
   const rpc = useLinearRpc();
-  const inbox = useAsync(
-    useCallback(async () => rpc.call("inbox", {}), [rpc]),
+  const summary = useAsync(
+    useCallback(async () => rpc.call("inboxSummary", null), [rpc]),
     [],
   );
-  useRealtime("linear:inbox", inbox.reload);
+  useRealtime("linear:inbox", summary.reload);
 
   /*
    * Rung 3 of the delivery ladder: the toast.
@@ -180,10 +180,10 @@ export function useInboxCount(): number {
    * ref rather than state, so the comparison itself never causes a render.
    */
   const previous = useRef<number | null>(null);
-  const ready = inbox.status === "ready" ? inbox.value : null;
+  const ready = summary.status === "ready" ? summary.value : null;
   const unseen = ready?.unseen ?? 0;
-  const newestText = ready?.items[0]?.text ?? null;
-  const newestIdentifier = ready?.items[0]?.identifier ?? null;
+  const newestText = ready?.newest?.text ?? null;
+  const newestIdentifier = ready?.newest?.identifier ?? null;
 
   useEffect(() => {
     if (ready === null) return;

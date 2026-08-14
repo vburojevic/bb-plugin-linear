@@ -25,6 +25,21 @@ import type { Grouping, PanelFilters, Sort } from "./contract.js";
 
 export type Segment = "working" | "inbox" | "all";
 
+/** Heavy panel RPCs are lazy by segment. The default Working set must not
+ * also build and serialise the hidden 300-row All issues view, and the Inbox
+ * needs neither issue projection. */
+export function loadsForSegment(segment: Segment): {
+  panel: boolean;
+  working: boolean;
+  facets: boolean;
+} {
+  return {
+    panel: segment === "all",
+    working: segment === "working",
+    facets: segment === "all",
+  };
+}
+
 export interface ChromeState {
   readonly segment: Segment;
   readonly teamId: string | null;

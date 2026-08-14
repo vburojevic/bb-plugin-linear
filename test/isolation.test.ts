@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createTestStore, issue, NOW, team } from "./helpers/store.js";
+import { createTestStore, issue, member, NOW, team } from "./helpers/store.js";
 
 /**
  * Multi-workspace isolation, at the store layer where the audit found the
@@ -78,6 +78,79 @@ describe("cross-workspace key collision is detectable", () => {
   });
 });
 
+describe("workspace vocabulary is isolated", () => {
+  it("scopes members, labels, project statuses, priority names, and viewers", () => {
+    const store = twoWorkspaceStore();
+    store.putMembers([
+      { ...member("u_me", "Personal Me", true), workspaceId: "ws_personal" },
+      { ...member("u_work", "Company Me", true), workspaceId: "ws_company" },
+      { ...member("u_colleague", "Company Colleague"), workspaceId: "ws_company" },
+    ]);
+    store.putLabels([
+      { id: "lp", workspaceId: "ws_personal", teamId: null, name: "Private", color: null, parentId: null, isGroup: false, updatedAt: NOW },
+      { id: "lc", workspaceId: "ws_company", teamId: null, name: "Confidential", color: null, parentId: null, isGroup: false, updatedAt: NOW },
+    ]);
+    store.replaceProjectStatuses(
+      [{ id: "sp", workspaceId: "ws_personal", name: "Personal active", type: "started", position: 1, color: null }],
+      "ws_personal",
+    );
+    store.replaceProjectStatuses(
+      [{ id: "sc", workspaceId: "ws_company", name: "Company active", type: "started", position: 1, color: null }],
+      "ws_company",
+    );
+    store.replacePriorityValues(
+      [{ priority: 1, label: "Personal urgent", workspaceId: "ws_personal" }],
+      "ws_personal",
+    );
+    store.replacePriorityValues(
+      [{ priority: 1, label: "Company urgent", workspaceId: "ws_company" }],
+      "ws_company",
+    );
+
+    expect(store.members(["team_p_eng"]).map((row) => row.id)).toEqual(["u_me"]);
+    expect(store.members(["team_c_eng"]).map((row) => row.id)).toEqual([
+      "u_colleague",
+      "u_work",
+    ]);
+    expect(store.viewer(["team_p_eng"])?.id).toBe("u_me");
+    expect(store.viewer(["team_c_eng"])?.id).toBe("u_work");
+    expect(store.labels(["team_p_eng"]).map((row) => row.name)).toEqual(["Private"]);
+    expect(store.labels(["team_c_eng"]).map((row) => row.name)).toEqual(["Confidential"]);
+    expect(store.projectStatuses(["team_p_eng"]).map((row) => row.id)).toEqual(["sp"]);
+    expect(store.projectStatuses(["team_c_eng"]).map((row) => row.id)).toEqual(["sc"]);
+    expect(store.priorityValues(["team_p_eng"])).toEqual([
+      { priority: 1, label: "Personal urgent" },
+    ]);
+    expect(store.priorityValues(["team_c_eng"])).toEqual([
+      { priority: 1, label: "Company urgent" },
+    ]);
+  });
+
+  it("deletes workspace vocabulary without touching another workspace", () => {
+    const store = twoWorkspaceStore();
+    store.putMembers([
+      { ...member("u_me", "Personal Me", true), workspaceId: "ws_personal" },
+      { ...member("u_work", "Company Me", true), workspaceId: "ws_company" },
+    ]);
+    store.putLabels([
+      { id: "lp", workspaceId: "ws_personal", teamId: null, name: "Private", color: null, parentId: null, isGroup: false, updatedAt: NOW },
+      { id: "lc", workspaceId: "ws_company", teamId: null, name: "Confidential", color: null, parentId: null, isGroup: false, updatedAt: NOW },
+    ]);
+    store.replaceProjectStatuses(
+      [{ id: "sc", name: "Company active", type: "started", position: 1, color: null }],
+      "ws_company",
+    );
+    store.replacePriorityValues([{ priority: 1, label: "Company urgent" }], "ws_company");
+
+    store.forgetWorkspace("ws_company");
+
+    expect(store.members().map((row) => row.id)).toEqual(["u_me"]);
+    expect(store.labels([]).map((row) => row.id)).toEqual(["lp"]);
+    expect(store.projectStatuses().map((row) => row.id)).not.toContain("sc");
+    expect(store.priorityValues().map((row) => row.label)).not.toContain("Company urgent");
+  });
+});
+
 describe("forgetWorkspace removes everything the workspace owned", () => {
   it("deletes company issues, comments, bindings, thread links and inbox rows — and leaves personal data intact", () => {
     const store = twoWorkspaceStore();
@@ -92,7 +165,7 @@ describe("forgetWorkspace removes everything the workspace owned", () => {
     store.putComments([{ id: "cc", issueId: "ic", userId: null, parentId: null, body: "company comment", url: null, createdAt: NOW, updatedAt: NOW, editedAt: null, resolvedAt: null }]);
     store.setBinding("proj_company", "team_c_eng", "primary", NOW);
     store.linkThread({ threadId: "th_c", issueId: "ic", teamId: "team_c_eng", projectId: "proj_company", createdAt: NOW, origin: "manual" });
-    store.putInbox([{ key: "n_c", kind: "assigned", issueId: "ic", teamId: "team_c_eng", actorId: null, title: "assigned", body: null, url: null, createdAt: NOW, seenAt: null, dismissedAt: null, linearReadAt: null }]);
+    store.putInbox([{ key: "n_c", workspaceId: "ws_company", kind: "assigned", issueId: "ic", teamId: "team_c_eng", actorId: null, title: "assigned", body: null, url: null, createdAt: NOW, seenAt: null, dismissedAt: null, linearReadAt: null }]);
 
     store.forgetWorkspace("ws_company");
 
@@ -173,6 +246,36 @@ describe("forgetWorkspace removes everything the workspace owned", () => {
     // permanently empty.
     const store = twoWorkspaceStore();
     expect(store.forgetWorkspace("ws_company")).toEqual(["team_c_eng"]);
+  });
+
+  it("deletes team-less inbox text and orphaned project metadata owned by the workspace", () => {
+    const store = twoWorkspaceStore();
+    store.putInbox([
+      { key: "n_p", workspaceId: "ws_personal", kind: "other", issueId: null, teamId: null, actorId: null, title: "personal notice", body: "personal body", url: null, createdAt: NOW, seenAt: null, dismissedAt: null, linearReadAt: null },
+      { key: "n_c", workspaceId: "ws_company", kind: "other", issueId: null, teamId: null, actorId: null, title: "company notice", body: "company secret", url: null, createdAt: NOW, seenAt: null, dismissedAt: null, linearReadAt: null },
+    ]);
+    store.putProjects(
+      [
+        { id: "project_p", name: "Personal project", description: "personal", url: "https://linear.app/p", statusId: null, leadId: null, startDate: null, targetDate: null, progress: null, updatedAt: NOW },
+        { id: "project_c", name: "Company project", description: "confidential", url: "https://linear.app/c", statusId: null, leadId: null, startDate: null, targetDate: null, progress: null, updatedAt: NOW },
+      ],
+      [
+        { projectId: "project_p", teamId: "team_p_eng" },
+        { projectId: "project_c", teamId: "team_c_eng" },
+      ],
+    );
+    store.putMilestones([
+      { id: "milestone_p", projectId: "project_p", name: "Personal milestone", targetDate: null, sortOrder: 1, updatedAt: NOW },
+      { id: "milestone_c", projectId: "project_c", name: "Company milestone", targetDate: null, sortOrder: 1, updatedAt: NOW },
+    ]);
+
+    store.forgetWorkspace("ws_company");
+
+    expect(store.inbox({ includeDismissed: true }).map((row) => row.key)).toEqual(["n_p"]);
+    expect(store.project("project_c")).toBeNull();
+    expect(store.milestone("milestone_c")).toBeNull();
+    expect(store.project("project_p")).not.toBeNull();
+    expect(store.milestone("milestone_p")).not.toBeNull();
   });
 
   it("sweeps teams with no recorded workspace when the primary key goes", () => {

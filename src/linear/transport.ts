@@ -136,15 +136,17 @@ const DEFAULT_TIMEOUT_MS = 20_000;
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener("abort", finish, { once: true });
+    if (signal?.aborted === true) finish();
   });
 }
 
@@ -249,20 +251,14 @@ export function createTransport(
       }
     }
     if (at < openUntil || probing) {
-      // One warn per outage, debug thereafter. A log flood is itself a
-      // performance failure and `bb plugin logs` rotates at 5 MB, so an
-      // outage that lasts an afternoon must not be the reason a diagnostic
-      // from this morning is gone.
-      log("debug", `Linear reads are paused until the cooldown ends: ${lastErrorText()}`);
+      // The transition into the open state already emitted one warning. Every
+      // gated poll after it is the same event; repeating it can rotate away
+      // the line that explains why the breaker opened.
       throw (
         lastError ??
         networkFailure("Linear is unreachable and reads are paused for a moment.")
       );
     }
-  }
-
-  function lastErrorText(): string {
-    return lastError === null ? "unknown failure" : lastError.message;
   }
 
   function noteSuccess(): void {

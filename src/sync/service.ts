@@ -183,8 +183,17 @@ function applyCommentPage(
   // A comment whose issue is not in the mirror belongs to something outside
   // the backfill window. Dropping it is better than writing an orphan the
   // detail pane can never show.
+  const mirroredIssueIds = new Set(
+    deps.store
+      .issuesByIds(
+        comments
+          .map((comment) => comment.issueId)
+          .filter((id): id is string => id !== ""),
+      )
+      .map((issue) => issue.id),
+  );
   const attached = comments.filter(
-    (comment) => comment.issueId !== "" && deps.store.issue(comment.issueId) !== null,
+    (comment) => comment.issueId !== "" && mirroredIssueIds.has(comment.issueId),
   );
   deps.store.putComments(attached);
 

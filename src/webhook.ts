@@ -53,6 +53,7 @@ export type VerifyFailure =
   | "no-signature"
   | "bad-signature"
   | "malformed"
+  | "missing-identity"
   | "stale-timestamp"
   | "future-timestamp"
   | "unknown-organization"
@@ -113,19 +114,26 @@ export function verifyWebhook(context: VerifyContext): VerifyResult {
     return { ok: false, reason: "malformed" };
   }
 
+  const selfTest = body.type === "SelfTest";
+  if (
+    !selfTest &&
+    (typeof body.organizationId !== "string" ||
+      body.organizationId === "" ||
+      typeof body.webhookId !== "string" ||
+      body.webhookId === "")
+  ) {
+    return { ok: false, reason: "missing-identity" };
+  }
+
   const drift = context.now - body.webhookTimestamp;
   if (drift > TIMESTAMP_WINDOW_MS) return { ok: false, reason: "stale-timestamp" };
   if (drift < -TIMESTAMP_WINDOW_MS) return { ok: false, reason: "future-timestamp" };
 
-  if (
-    context.organizationId !== null &&
-    body.organizationId !== undefined &&
-    body.organizationId !== context.organizationId
-  ) {
+  if (!selfTest && (context.organizationId === null || body.organizationId !== context.organizationId)) {
     return { ok: false, reason: "unknown-organization" };
   }
 
-  if (body.webhookId !== undefined && !context.knownWebhookIds.has(body.webhookId)) {
+  if (!selfTest && !context.knownWebhookIds.has(body.webhookId!)) {
     return { ok: false, reason: "unknown-webhook" };
   }
 
@@ -175,6 +183,31 @@ export function webhookDeliveryKey(body: WebhookBody): string {
  */
 export function signPayload(secret: string, raw: string): string {
   return createHmac("sha256", secret).update(raw).digest("hex");
+}
+
+/** Parse only enough of an already byte-limited body to choose the secret that
+ * must authenticate it. Nothing returned here is trusted until verifyWebhook
+ * succeeds. */
+export function webhookEnvelope(raw: string): {
+  readonly type: string;
+  readonly webhookId: string | null;
+  readonly nonce: string | null;
+} | null {
+  try {
+    const value = JSON.parse(raw) as {
+      type?: unknown;
+      webhookId?: unknown;
+      data?: { id?: unknown };
+    };
+    if (typeof value.type !== "string") return null;
+    return {
+      type: value.type,
+      webhookId: typeof value.webhookId === "string" ? value.webhookId : null,
+      nonce: typeof value.data?.id === "string" ? value.data.id : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function selfTestPayload(now: number, nonce: string): string {

@@ -1,4 +1,7 @@
 import { randomBytes } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 import { describeError } from "./linear/errors.js";
 import { selfTestPayload, signPayload } from "./webhook.js";
 
@@ -37,13 +40,35 @@ export type PostLike = (
  * there would hang the `enable` command rather than answer it.
  */
 const defaultPost: PostLike = async (url, init) => {
-  const response = await fetch(url, {
-    method: init.method,
-    headers: init.headers,
-    body: init.body,
-    signal: init.signal ?? AbortSignal.timeout(10_000),
+  const parsed = new URL(url);
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  const literalFamily = isIP(hostname);
+  const addresses = literalFamily === 0
+    ? await dnsLookup(hostname, { all: true, verbatim: true })
+    : [{ address: hostname, family: literalFamily }];
+  if (addresses.length === 0 || addresses.some((entry) => isPrivateHost(entry.address))) {
+    throw new Error("Webhook hostname resolved to a private, local, or unavailable address.");
+  }
+  const selected = addresses[0]!;
+
+  return await new Promise<{ status: number }>((resolve, reject) => {
+    const request = httpsRequest(parsed, {
+      method: init.method,
+      headers: init.headers,
+      signal: init.signal ?? AbortSignal.timeout(10_000),
+      // Pin the address checked above. Re-resolving here would reopen the DNS
+      // rebinding window; https.request itself never follows redirects.
+      lookup: ((_hostname: string, _options: unknown, callback: Function) => {
+        callback(null, selected.address, selected.family);
+      }) as never,
+    }, (response) => {
+      const status = response.statusCode ?? 0;
+      response.destroy();
+      resolve({ status });
+    });
+    request.on("error", reject);
+    request.end(init.body);
   });
-  return { status: response.status };
 };
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -102,8 +127,8 @@ export function checkWebhookUrl(raw: string): UrlVerdict {
  * webhook target must never be, because Linear cannot reach them and a
  * self-test to them is an SSRF primitive. Hostnames are lower-cased; a bare
  * `localhost` and the common private forms are covered without a DNS lookup
- * (the plugin does not resolve names — a public name that resolves privately
- * is out of scope for a local, write-gated, user-typed command).
+ * Literal checks happen here; the self-test also resolves and pins the public
+ * address immediately before opening its TLS connection.
  */
 export function isPrivateHost(hostname: string): boolean {
   // A trailing dot is a fully-qualified name and resolves identically, so it
@@ -118,6 +143,10 @@ export function isPrivateHost(hostname: string): boolean {
     if (host === "::1" || host === "::") return true;
     if (/^f[cd][0-9a-f]{0,2}:/.test(host)) return true; // unique-local
     if (/^fe[89ab][0-9a-f]:/.test(host)) return true; // link-local
+    if (/^fe[c-f][0-9a-f]:/.test(host)) return true; // deprecated site-local
+    if (/^ff[0-9a-f]{2}:/.test(host)) return true; // multicast
+    if (/^100:0*:0*:0*:/.test(host)) return true; // discard-only 100::/64
+    if (/^2001:db8:/.test(host)) return true; // documentation, not globally routable
     // An IPv4-mapped or -compatible address is the mapped address: the
     // ::ffff:127.0.0.1 spelling of loopback must not read as public.
     const mapped = host.match(/^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
@@ -137,12 +166,20 @@ export function isPrivateHost(hostname: string): boolean {
 
   const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4 === null) return false;
-  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  const octets = v4.slice(1).map(Number);
+  if (octets.some((value) => value > 255)) return true;
+  const [a, b, c] = octets as [number, number, number, number];
   if (a === 10 || a === 127 || a === 0) return true;
   if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
+  if (a === 192 && b === 88 && c === 99) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmark networks
+  if (a === 198 && b === 51 && c === 100) return true; // documentation
+  if (a === 203 && b === 0 && c === 113) return true; // documentation
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a >= 224) return true; // multicast and reserved
   return false;
 }
 

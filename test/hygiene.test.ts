@@ -37,7 +37,7 @@ describe("network egress census", () => {
     // the budget, the breaker and the write-consent gate live); the webhook
     // self-test POSTs a signed nonce to the user's own URL. A third fetch is
     // a path around all four protections.
-    const sanctioned = new Set(["src/linear/transport.ts", "src/webhook-register.ts"]);
+    const sanctioned = new Set(["src/linear/transport.ts"]);
     const callers = serverFiles
       .filter((path) => /\bfetch\s*\(|globalThis\.fetch/.test(readFileSync(path, "utf8")))
       .map(relative);

@@ -1,5 +1,5 @@
 import type { BbPluginApi } from "@bb/plugin-sdk";
-import { scopeFor, crossTeamRefusal } from "../bindings.js";
+import { scopeFor } from "../bindings.js";
 import { describeError } from "../linear/errors.js";
 import type { LinearClient } from "../linear/client.js";
 import { updateIssue, type MutationDeps } from "../mutations.js";
@@ -40,6 +40,12 @@ export interface StartDeps {
   /** The key that can reach a given issue. A Linear key is scoped to one
    *  workspace, and this bb may hold several. */
   readonly clientForIssue: (issueId: string) => LinearClient;
+  /** Resolve one issue through only the credentials represented by the
+   *  selected project's read scope. */
+  readonly refreshIssue: (
+    idOrIdentifier: string,
+    readTeamIds: readonly string[],
+  ) => Promise<IssueRow | null>;
   readonly store: Store;
   readonly mutations: MutationDeps;
   readonly bindings: () => readonly BindingRow[];
@@ -98,68 +104,85 @@ export async function startThreadFromIssue(
 ): Promise<StartResult> {
   const bindings = deps.bindings();
 
-  // Resolve the issue first, from the mirror where possible. `Query.issue`
-  // accepts an identifier as well as a UUID, so a user-typed string can
-  // resolve to something real — the team check has to come after resolution,
-  // never before.
-  const local = deps.store.issue(input.issueId) ?? deps.store.issueByIdentifier(input.issueId);
-  const target = local?.id ?? input.issueId;
-  const detail = await deps.clientForIssue(target).issueDetail(target, {
+  // Resolve only after a bb project establishes the read scope. An identifier
+  // such as ENG-42 is not globally unique once two Linear workspaces are
+  // connected; singular lookup before this point lets SQLite pick which
+  // company's issue gets a thread — and, optionally, a status move.
+  const exact = deps.store.issue(input.issueId);
+  const matches = exact === null ? deps.store.issuesByIdentifier(input.issueId) : [exact];
+  let projectId = input.projectId;
+  if (projectId === undefined) {
+    const matchingTeamIds = new Set(matches.map((row) => row.teamId));
+    const candidates = [
+      ...new Set(
+        bindings
+          .filter((row) => matches.length === 0 || matchingTeamIds.has(row.teamId))
+          .map((row) => row.projectId),
+      ),
+    ];
+    if (candidates.length === 0) {
+      return {
+        ok: false,
+        threadId: null,
+        message: "No bb project is bound to a readable Linear team. Bind one first.",
+        note: null,
+      };
+    }
+    if (candidates.length > 1) {
+      return {
+        ok: false,
+        threadId: null,
+        message: "More than one bb project could own this issue. Say which one.",
+        note: null,
+      };
+    }
+    projectId = candidates[0]!;
+  }
+
+  const scope = scopeFor(projectId, bindings);
+  const inScope = matches.filter((row) => scope.readTeamIds.includes(row.teamId));
+  if (inScope.length > 1) {
+    return {
+      ok: false,
+      threadId: null,
+      message: `${input.issueId} exists more than once in this project's Linear scope. Use the issue id or URL.`,
+      note: null,
+    };
+  }
+  let issue: IssueRow | null = inScope[0] ?? null;
+  if (issue === null) {
+    issue = await deps.refreshIssue(input.issueId, scope.readTeamIds);
+  }
+  if (issue === null || !scope.readTeamIds.includes(issue.teamId)) {
+    return {
+      ok: false,
+      threadId: null,
+      message: `No issue called ${input.issueId} is readable by that project.`,
+      note: null,
+    };
+  }
+
+  const detail = await deps.clientForIssue(issue.id).issueDetail(issue.id, {
     initiator: "user",
   });
+  // The issue may have moved teams since the mirror row was written. Check
+  // the fresh team before persisting any returned title, description or
+  // comments, then re-read the row used by every downstream action.
+  if (!scope.readTeamIds.includes(detail.issue.team.id)) {
+    return {
+      ok: false,
+      threadId: null,
+      message: `${input.issueId} moved outside that project's Linear scope.`,
+      note: null,
+    };
+  }
   applyIssueDetail(deps.store, detail.issue, deps.now());
-  const issue = deps.store.issue(detail.issue.id);
+  issue = deps.store.issue(detail.issue.id);
   if (issue === null) {
     return {
       ok: false,
       threadId: null,
       message: `Couldn't read ${input.issueId}.`,
-      note: null,
-    };
-  }
-
-  // Which bb project should own the thread? Every project bound to this
-  // issue's team is a candidate.
-  const candidates = [
-    ...new Set(
-      bindings.filter((row) => row.teamId === issue.teamId).map((row) => row.projectId),
-    ),
-  ];
-  const projectId = input.projectId ?? (candidates.length === 1 ? candidates[0] : undefined);
-
-  if (projectId === undefined) {
-    const team = deps.store.team(issue.teamId);
-    if (candidates.length === 0) {
-      return {
-        ok: false,
-        threadId: null,
-        message: `No bb project is bound to ${team?.name ?? "that team"}. Bind one in this plugin's settings first.`,
-        note: null,
-      };
-    }
-    return {
-      ok: false,
-      threadId: null,
-      message: `${candidates.length} bb projects are bound to ${team?.name ?? "that team"}. Say which one.`,
-      note: null,
-    };
-  }
-
-  const scope = scopeFor(projectId, bindings);
-  if (!scope.readTeamIds.includes(issue.teamId)) {
-    const team = deps.store.team(issue.teamId);
-    const allowed = scope.readTeamIds
-      .map((id) => deps.store.team(id))
-      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
-    return {
-      ok: false,
-      threadId: null,
-      message: crossTeamRefusal({
-        identifier: issue.identifier,
-        targetTeam: { name: team?.name ?? "another team", key: team?.key ?? "?" },
-        allowed: allowed.map((entry) => ({ name: entry.name, key: entry.key })),
-        action: "read",
-      }),
       note: null,
     };
   }
@@ -179,7 +202,8 @@ export async function startThreadFromIssue(
   const states = deps.store.workflowStates(issue.teamId);
   const plan = buildSpawnRequest({
     issue: toSpawnIssue(detail.issue, {
-      memberName: (id) => deps.store.members().find((member) => member.id === id)?.displayName ?? null,
+      memberName: (id) =>
+        deps.store.members([issue.teamId]).find((member) => member.id === id)?.displayName ?? null,
       labelName: (id) => deps.store.labels([issue.teamId]).find((label) => label.id === id)?.name ?? null,
       stateName: (id) => states.find((state) => state.id === id)?.name ?? null,
     }),

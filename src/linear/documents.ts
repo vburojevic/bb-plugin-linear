@@ -705,9 +705,10 @@ export const NOTIFICATION_PAGE_SIZE = 50;
 export const NOTIFICATIONS = doc(
   "Notifications",
   "query",
-  `query Notifications($since: DateTimeOrDuration!, $first: Int!) {
+  `query Notifications($since: DateTimeOrDuration!, $first: Int!, $after: String) {
   notifications(
     first: $first
+    after: $after
     orderBy: createdAt
     filter: { createdAt: { gt: $since } }
   ) {

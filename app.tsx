@@ -1,7 +1,7 @@
 // bb-plugin-linear — frontend entry. Registration only; views live in app/.
 import "./app.css";
 import { useCallback } from "react";
-import { definePluginApp } from "@bb/plugin-sdk/app";
+import { definePluginApp, useRealtime } from "@bb/plugin-sdk/app";
 import {
   Card,
   CardContent,
@@ -22,6 +22,7 @@ function ConnectionCard() {
     useCallback(async () => rpc.call("status"), [rpc]),
     [],
   );
+  useRealtime("linear:connection", state.reload);
 
   return (
     <Card>

@@ -261,6 +261,8 @@ describe("isPrivateHost — the self-test SSRF guard", () => {
       "localhost", "app.localhost", "127.0.0.1", "0.0.0.0", "10.1.2.3",
       "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", // cloud metadata
       "::1", "fd00::1", "fe80::1",
+      "198.18.0.1", "224.0.0.1", "255.255.255.255",
+      "fec0::1", "ff02::1",
     ]) {
       expect(isPrivateHost(host), host).toBe(true);
     }
@@ -286,6 +288,10 @@ describe("checkWebhookUrl refuses private targets", () => {
 
   it("still accepts a normal public https URL", () => {
     expect(checkWebhookUrl("https://hooks.example.com/linear").ok).toBe(true);
+  });
+
+  it("accepts a public IPv6 literal", () => {
+    expect(checkWebhookUrl("https://[2606:4700:4700::1111]/linear").ok).toBe(true);
   });
 })
 

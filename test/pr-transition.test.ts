@@ -196,6 +196,11 @@ describe("matchesTargetBranch", () => {
     expect(matchesTargetBranch(state, "main")).toBe(false);
   });
 
+  it("refuses regex character-class escapes instead of misreading them as literals", () => {
+    const state = { ...REVIEW, targetBranchPattern: "\\d", targetBranchIsRegex: true };
+    expect(matchesTargetBranch(state, "d")).toBe(false);
+  });
+
   it("skips an over-long pattern", () => {
     const state = { ...REVIEW, targetBranchPattern: "a".repeat(300), targetBranchIsRegex: true };
     expect(matchesTargetBranch(state, "a")).toBe(false);

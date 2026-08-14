@@ -73,6 +73,7 @@ export function applyBootstrap(
   store.putMembers([
     {
       id: viewer.id,
+      workspaceId: viewer.organization.id,
       name: viewer.name,
       displayName: viewer.displayName,
       email: viewer.email,
@@ -90,18 +91,22 @@ export function applyBootstrap(
   store.replaceProjectStatuses(
     viewer.organization.projectStatuses.map((status) => ({
       id: status.id,
+      workspaceId: viewer.organization.id,
       name: status.name,
       type: status.type,
       position: status.position,
       color: status.color,
     })),
+    viewer.organization.id,
   );
 
   store.replacePriorityValues(
     result.issuePriorityValues.map((value) => ({
       priority: value.priority,
       label: value.label,
+      workspaceId: viewer.organization.id,
     })),
+    viewer.organization.id,
   );
 
   store.putTeams(
@@ -137,8 +142,8 @@ function toTeam(
  * States are **replaced** per team rather than upserted, because a state
  * deleted in Linear has no tombstone: an upsert would leave it in the picker
  * forever, and picking it would fail with an error about an id that no longer
- * exists. Labels and members are upserted, because they are workspace-wide and
- * one team's page says nothing about another's.
+ * exists. Members are also replaced per workspace: the active-users query has
+ * no tombstone for someone who left, so upserting would retain them forever.
  */
 export function applyTeamGraph(
   store: Store,
@@ -146,6 +151,10 @@ export function applyTeamGraph(
   teamIds: readonly string[],
   at: number,
 ): void {
+  const workspaceId =
+    teamIds
+      .map((teamId) => store.workspaceForTeam(teamId)?.id ?? null)
+      .find((id): id is string => id !== null) ?? store.workspace()?.id;
   const byTeam = new Map<string, WorkflowStateRow[]>();
   for (const teamId of teamIds) byTeam.set(teamId, []);
   for (const node of result.workflowStates.nodes) {
@@ -172,6 +181,7 @@ export function applyTeamGraph(
 
   const labels: LabelRow[] = result.issueLabels.nodes.map((node) => ({
     id: node.id,
+    ...(workspaceId === undefined ? {} : { workspaceId }),
     teamId: node.team?.id ?? null,
     name: node.name,
     color: node.color,
@@ -183,6 +193,7 @@ export function applyTeamGraph(
 
   const members: MemberRow[] = result.users.nodes.map((node) => ({
     id: node.id,
+    ...(workspaceId === undefined ? {} : { workspaceId }),
     name: node.name,
     displayName: node.displayName,
     email: node.email,
@@ -192,7 +203,8 @@ export function applyTeamGraph(
     isMe: node.isMe,
     updatedAt: at,
   }));
-  store.putMembers(members);
+  if (workspaceId === undefined) store.putMembers(members);
+  else store.replaceWorkspaceMembers(workspaceId, members);
 }
 
 export function toIssueInput(node: IssueNode): IssueInput {
@@ -286,8 +298,11 @@ export function applyIssueDetail(store: Store, node: IssueDetailNode, at: number
   // blank every other column until the poller happened to touch it again —
   // which is a worse row than the one it replaced, arriving as a side effect
   // of opening the parent.
+  const existingChildren = new Set(
+    store.issuesByIds(node.children.nodes.map((child) => child.id)).map((child) => child.id),
+  );
   const stubs = node.children.nodes
-    .filter((child) => store.issue(child.id) === null)
+    .filter((child) => !existingChildren.has(child.id))
     .map((child) => detailChildToNode(child, node));
 
   applyIssues(store, [node, ...stubs], at);

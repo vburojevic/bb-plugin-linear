@@ -68,6 +68,7 @@ export type WriteRefusal = z.infer<typeof writeRefusalSchema>;
 
 export const connectionStateSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("no-credential") }),
+  z.object({ kind: z.literal("checking") }),
   z.object({
     kind: z.literal("connected"),
     viewer: viewerViewSchema,
@@ -529,6 +530,17 @@ export const inboxViewSchema = z.object({
 });
 export type InboxView = z.infer<typeof inboxViewSchema>;
 
+export const inboxSummarySchema = z.object({
+  unseen: z.number(),
+  newest: z
+    .object({
+      text: z.string(),
+      identifier: z.string().nullable(),
+    })
+    .nullable(),
+});
+export type InboxSummary = z.infer<typeof inboxSummarySchema>;
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Facets, teams, bindings                                                    */
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -821,6 +833,13 @@ export const rpcContract = defineRpcContract({
   inbox: {
     input: z.object({ markSeen: z.boolean().optional() }).strict(),
     output: inboxViewSchema,
+  },
+
+  /** Badge and toast data only. The always-mounted segment control must not
+   * serialise two hundred inbox rows merely to draw one number. */
+  inboxSummary: {
+    input: z.null(),
+    output: inboxSummarySchema,
   },
 
   dismissInbox: {

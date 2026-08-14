@@ -17,6 +17,7 @@ import { StateGlyph } from "./StateGlyph.js";
 import { PropertyEditors, useEditorOptions } from "./Editors.js";
 import { safeHref } from "./href.js";
 import { useAsync, useLinearRpc } from "./rpc.js";
+import { safeRemoteMarkdown } from "../src/security-boundaries.js";
 
 /**
  * One issue, in the order you need it.
@@ -230,7 +231,7 @@ function IssueBody({
             renderer. */}
         <div className="border-t border-border px-4 py-3">
           {detail.description !== null && detail.description.trim() !== "" ? (
-            <Markdown content={detail.description} />
+            <Markdown content={safeRemoteMarkdown(detail.description)} />
           ) : (
             <p className="text-sm italic text-muted-foreground opacity-70">No description.</p>
           )}
@@ -381,11 +382,7 @@ function Comments({ detail }: { detail: DetailView }) {
               className="mt-0.5 grid size-6 shrink-0 place-items-center overflow-hidden rounded-full bg-muted text-[10px] font-medium text-muted-foreground"
               aria-hidden
             >
-              {comment.avatarUrl !== null ? (
-                <img src={comment.avatarUrl} alt="" className="size-6 object-cover" />
-              ) : (
-                comment.authorInitials
-              )}
+              {comment.authorInitials}
             </span>
 
             <div className="min-w-0 flex-1 space-y-0.5">
@@ -400,7 +397,7 @@ function Comments({ detail }: { detail: DetailView }) {
                   <span className="text-[11px] text-muted-foreground opacity-70">edited</span>
                 ) : null}
               </div>
-              <Markdown content={comment.body} className="text-[13px]" />
+              <Markdown content={safeRemoteMarkdown(comment.body)} className="text-[13px]" />
             </div>
           </li>
         ))}

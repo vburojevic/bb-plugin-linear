@@ -69,6 +69,8 @@ export interface WorkflowStateRow {
 
 export interface LabelRow {
   readonly id: string;
+  /** Present on sync inputs so a workspace-level label never loses its owner. */
+  readonly workspaceId?: string;
   /** `null` means **workspace-level**, not orphaned. */
   readonly teamId: string | null;
   readonly name: string;
@@ -80,6 +82,8 @@ export interface LabelRow {
 
 export interface MemberRow {
   readonly id: string;
+  /** Present on sync inputs; one person can belong to more than one workspace. */
+  readonly workspaceId?: string;
   readonly name: string;
   readonly displayName: string;
   readonly email: string | null;
@@ -92,6 +96,8 @@ export interface MemberRow {
 
 export interface ProjectStatusRow {
   readonly id: string;
+  /** Present on sync inputs; project statuses are organization-scoped. */
+  readonly workspaceId?: string;
   readonly name: string;
   readonly type: string;
   readonly position: number;
@@ -101,6 +107,8 @@ export interface ProjectStatusRow {
 export interface PriorityValueRow {
   readonly priority: number;
   readonly label: string;
+  /** Present on sync inputs; priority labels can differ by organization. */
+  readonly workspaceId?: string;
 }
 
 export interface IssueRow {
@@ -180,6 +188,7 @@ export interface ThreadLinkRow {
 
 export interface InboxRowRecord {
   readonly key: string;
+  readonly workspaceId: string;
   readonly kind: string;
   readonly issueId: string | null;
   readonly teamId: string | null;

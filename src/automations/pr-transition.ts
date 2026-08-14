@@ -91,11 +91,71 @@ export function matchesTargetBranch(
   if (!state.targetBranchIsRegex) {
     return state.targetBranchPattern === baseRefName;
   }
-  try {
-    return new RegExp(state.targetBranchPattern).test(baseRefName);
-  } catch {
-    return false;
+  const pattern = safeBranchPattern(state.targetBranchPattern);
+  return pattern === null ? false : wildcardMatch(pattern, baseRefName);
+}
+
+type SafePatternToken =
+  | { readonly kind: "literal"; readonly value: string }
+  | { readonly kind: "wildcard" };
+
+/** Linear calls this field a regex, but arbitrary backtracking syntax cannot
+ * run on bb's event loop. Support the useful deterministic subset: anchors,
+ * literals, escaped literals, and `.*`. Everything else is refused. */
+function safeBranchPattern(raw: string): readonly SafePatternToken[] | null {
+  let pattern = raw;
+  const anchoredStart = pattern.startsWith("^");
+  const anchoredEnd = pattern.endsWith("$") && !pattern.endsWith("\\$");
+  if (anchoredStart) pattern = pattern.slice(1);
+  if (anchoredEnd) pattern = pattern.slice(0, -1);
+
+  const tokens: SafePatternToken[] = [];
+  if (!anchoredStart) tokens.push({ kind: "wildcard" });
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index]!;
+    if (char === "\\") {
+      const escaped = pattern[index + 1];
+      if (escaped === undefined) return null;
+      // Letter/digit escapes carry regex semantics (\d, \w, backrefs,
+      // unicode escapes). Reading them as the final character can silently
+      // select an automation for the wrong branch, so this subset refuses them.
+      if (/^[A-Za-z0-9]$/.test(escaped)) return null;
+      tokens.push({ kind: "literal", value: escaped });
+      index += 1;
+      continue;
+    }
+    if (char === "." && pattern[index + 1] === "*") {
+      if (tokens.at(-1)?.kind !== "wildcard") tokens.push({ kind: "wildcard" });
+      index += 1;
+      continue;
+    }
+    if (".^$+?()[]{}|*".includes(char)) return null;
+    tokens.push({ kind: "literal", value: char });
   }
+  if (!anchoredEnd && tokens.at(-1)?.kind !== "wildcard") tokens.push({ kind: "wildcard" });
+  return tokens;
+}
+
+/** Glob-style dynamic programming. Runtime is bounded by pattern × branch
+ * length and never depends on a regex engine's backtracking choices. */
+function wildcardMatch(tokens: readonly SafePatternToken[], value: string): boolean {
+  let previous = new Array<boolean>(value.length + 1).fill(false);
+  previous[0] = true;
+  for (const token of tokens) {
+    const next = new Array<boolean>(value.length + 1).fill(false);
+    if (token.kind === "wildcard") {
+      next[0] = previous[0]!;
+      for (let index = 1; index <= value.length; index += 1) {
+        next[index] = previous[index]! || next[index - 1]!;
+      }
+    } else {
+      for (let index = 1; index <= value.length; index += 1) {
+        next[index] = previous[index - 1]! && value[index - 1] === token.value;
+      }
+    }
+    previous = next;
+  }
+  return previous[value.length]!;
 }
 
 function findAutomation(

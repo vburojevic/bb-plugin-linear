@@ -22,7 +22,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import type { Grouping, Sort } from "../src/contract.js";
-import { chrome, hasActiveFilters, usePanelChrome } from "../src/panel-chrome.js";
+import {
+  chrome,
+  hasActiveFilters,
+  loadsForSegment,
+  usePanelChrome,
+} from "../src/panel-chrome.js";
 import { useAsync, useLinearRpc } from "./rpc.js";
 
 /**
@@ -43,6 +48,7 @@ export function LinearPanelHeader() {
   const isCompact = useIsCompactViewport();
   const [searchOpen, setSearchOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const loads = loadsForSegment(state.segment);
 
   const bindings = useAsync(
     useCallback(async () => rpc.call("bindings", null), [rpc]),
@@ -51,9 +57,14 @@ export function LinearPanelHeader() {
   const facets = useAsync(
     useCallback(async () => rpc.call("facets", { team: state.teamId }), [rpc, state.teamId]),
     [state.teamId],
+    loads.facets,
   );
 
-  useRealtime("linear:data", bindings.reload);
+  const reloadStructure = useCallback(() => {
+    bindings.reload();
+    if (loads.facets) facets.reload();
+  }, [bindings.reload, facets.reload, loads.facets]);
+  useRealtime("linear:structure", reloadStructure);
 
   useEffect(() => {
     if (searchOpen) searchRef.current?.focus();
@@ -93,7 +104,7 @@ export function LinearPanelHeader() {
         room cannot hold six facets, so filters and sort move into the
         overflow menu rather than being crushed into it.
       */}
-      {isCompact && !searchOpen ? (
+      {loads.panel ? isCompact && !searchOpen ? (
         <Button
           variant="ghost"
           size="icon"
@@ -128,9 +139,9 @@ export function LinearPanelHeader() {
             className="h-7 w-40 pl-7 text-xs md:w-56"
           />
         </div>
-      )}
+      ) : null}
 
-      <DropdownMenu>
+      {loads.panel ? <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
             variant="ghost"
@@ -226,7 +237,7 @@ export function LinearPanelHeader() {
             </>
           ) : null}
         </DropdownMenuContent>
-      </DropdownMenu>
+      </DropdownMenu> : null}
     </div>
   );
 }

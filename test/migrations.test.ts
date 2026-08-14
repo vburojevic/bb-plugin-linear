@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { MIGRATIONS } from "../src/store/migrations.js";
+import { createStore } from "../src/store/store.js";
 
 /**
  * The shipped migration prefix is frozen, byte for byte.
@@ -99,5 +101,131 @@ describe("migrations", () => {
         ).toBe(true);
       }
     }
+  });
+
+  it("fails closed when upgrading ambiguous vocabulary from multiple workspaces", () => {
+    const vocabularyStart = MIGRATIONS.findIndex((statement) =>
+      statement.includes("CREATE TABLE IF NOT EXISTS workspace_label"),
+    );
+    expect(vocabularyStart).toBeGreaterThan(0);
+
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS.slice(0, vocabularyStart)) db.prepare(statement).run();
+    const insertWorkspace = db.prepare(
+      `INSERT INTO workspace
+        (id, name, url_key, viewer_id, viewer_name, git_branch_format, fetched_at, slot)
+       VALUES (?, ?, ?, ?, ?, NULL, 1, ?)`,
+    );
+    insertWorkspace.run("ws_p", "Personal", "p", "u_p", "Personal Me", "apiKey");
+    insertWorkspace.run("ws_c", "Company", "c", "u_c", "Company Me", "apiKey2");
+    db.prepare(
+      `INSERT INTO team (id, key, name, fetched_at, workspace_id)
+       VALUES ('team_p', 'PER', 'Personal team', 1, 'ws_p'),
+              ('team_c', 'COM', 'Company team', 1, 'ws_c')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO label (id, team_id, name)
+       VALUES ('label_team', 'team_p', 'Personal team label'),
+              ('label_unknown', NULL, 'Unknown workspace label')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO member (id, name, display_name, is_me)
+       VALUES ('u_p', 'Personal Me', 'Personal Me', 1),
+              ('u_c', 'Company Me', 'Company Me', 1),
+              ('u_member', 'Personal Member', 'Personal Member', 0)`,
+    ).run();
+    db.prepare(`INSERT INTO team_member (team_id, user_id) VALUES ('team_p', 'u_member')`).run();
+    db.prepare(
+      `INSERT INTO project_status (id, name, type) VALUES ('status_unknown', 'Unknown status', 'started')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO priority_value (priority, label) VALUES (1, 'Unknown urgent')`,
+    ).run();
+
+    for (const statement of MIGRATIONS.slice(vocabularyStart)) db.prepare(statement).run();
+    const store = createStore(db);
+
+    expect(store.labels(["team_p"]).map((row) => row.id)).toEqual(["label_team"]);
+    expect(store.labels([])).toEqual([]);
+    expect(store.members(["team_p"]).map((row) => row.id).sort()).toEqual(["u_member", "u_p"]);
+    expect(store.members(["team_c"]).map((row) => row.id)).toEqual(["u_c"]);
+    expect(store.projectStatuses(["team_p"])).toEqual([]);
+    expect(store.priorityValues(["team_p"])).toEqual([]);
+  });
+
+  it("does not attribute an unknown legacy inbox team to the primary workspace", () => {
+    const inboxOwnershipStart = MIGRATIONS.findIndex((statement) =>
+      statement.includes("ALTER TABLE inbox ADD COLUMN workspace_id"),
+    );
+    expect(inboxOwnershipStart).toBeGreaterThan(0);
+
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS.slice(0, inboxOwnershipStart)) {
+      db.prepare(statement).run();
+    }
+    const insertWorkspace = db.prepare(
+      `INSERT INTO workspace
+        (id, name, url_key, viewer_id, viewer_name, git_branch_format, fetched_at, slot)
+       VALUES (?, ?, ?, ?, ?, NULL, 1, ?)`,
+    );
+    insertWorkspace.run("ws_p", "Personal", "p", "u_p", "Personal Me", "apiKey");
+    insertWorkspace.run("ws_c", "Company", "c", "u_c", "Company Me", "apiKey2");
+    db.prepare(
+      `INSERT INTO team (id, key, name, fetched_at, workspace_id)
+       VALUES ('team_legacy', 'OLD', 'Legacy primary team', 1, NULL),
+              ('team_company', 'COM', 'Company team', 1, 'ws_c')`,
+    ).run();
+    const insertInbox = db.prepare(
+      `INSERT INTO inbox
+        (key, kind, issue_id, team_id, actor_id, title, body, url, created_at,
+         seen_at, dismissed_at, linear_read_at)
+       VALUES (?, 'other', NULL, ?, NULL, ?, ?, NULL, 1, NULL, NULL, NULL)`,
+    );
+    insertInbox.run("known-primary", "team_legacy", "known primary", "keep");
+    insertInbox.run("known-company", "team_company", "known company", "keep");
+    insertInbox.run("unknown-team", "team_missing", "unknown team", "discard");
+    insertInbox.run("teamless", null, "teamless unknown", "discard");
+
+    for (const statement of MIGRATIONS.slice(inboxOwnershipStart)) {
+      db.prepare(statement).run();
+    }
+
+    expect(
+      db.prepare(`SELECT key, workspace_id AS workspaceId FROM inbox ORDER BY key`).all(),
+    ).toEqual([
+      { key: "ws_c:known-company", workspaceId: "ws_c" },
+      { key: "ws_p:known-primary", workspaceId: "ws_p" },
+    ]);
+  });
+
+  it("discards ownerless legacy inbox rows even when only one workspace was recorded", () => {
+    const inboxOwnershipStart = MIGRATIONS.findIndex((statement) =>
+      statement.includes("ALTER TABLE inbox ADD COLUMN workspace_id"),
+    );
+    expect(inboxOwnershipStart).toBeGreaterThan(0);
+
+    const db = new Database(":memory:");
+    for (const statement of MIGRATIONS.slice(0, inboxOwnershipStart)) {
+      db.prepare(statement).run();
+    }
+    db.prepare(
+      `INSERT INTO workspace
+        (id, name, url_key, viewer_id, viewer_name, git_branch_format, fetched_at, slot)
+       VALUES ('ws_p', 'Personal', 'p', 'u_p', 'Personal Me', NULL, 1, 'apiKey')`,
+    ).run();
+    const insertInbox = db.prepare(
+      `INSERT INTO inbox
+        (key, kind, issue_id, team_id, actor_id, title, body, url, created_at,
+         seen_at, dismissed_at, linear_read_at)
+       VALUES (?, 'other', NULL, ?, NULL, ?, ?, NULL, 1, NULL, NULL, NULL)`,
+    );
+    insertInbox.run("unknown-team", "team_missing", "unknown team", "discard");
+    insertInbox.run("teamless", null, "teamless unknown", "discard");
+
+    for (const statement of MIGRATIONS.slice(inboxOwnershipStart)) {
+      db.prepare(statement).run();
+    }
+
+    expect(db.prepare(`SELECT key, workspace_id FROM inbox`).all()).toEqual([]);
   });
 });

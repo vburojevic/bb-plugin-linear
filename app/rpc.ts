@@ -33,6 +33,7 @@ export type AsyncState<T> =
 export function useAsync<T>(
   load: (signal: AbortSignal) => Promise<T>,
   deps: readonly unknown[],
+  enabled = true,
 ): AsyncState<T> & { reload: () => void } {
   const [state, setState] = useState<AsyncState<T>>({ status: "loading" });
   const [nonce, setNonce] = useState(0);
@@ -42,6 +43,7 @@ export function useAsync<T>(
   loadRef.current = load;
 
   useEffect(() => {
+    if (!enabled) return;
     const controller = new AbortController();
     setState((current) =>
       current.status === "ready" ? { ...current, refreshing: true } : current,
@@ -61,7 +63,7 @@ export function useAsync<T>(
       });
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, nonce]);
+  }, [...deps, nonce, enabled]);
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
   return { ...state, reload };

@@ -13,6 +13,7 @@ import {
   type MutationDeps,
 } from "./mutations.js";
 import type { AgentWrites } from "./settings.js";
+import { UNTRUSTED_LINEAR_POLICY } from "./security-boundaries.js";
 import type { BindingRow, IssueRow, TeamRow } from "./store/rows.js";
 import type { Store } from "./store/store.js";
 import {
@@ -58,7 +59,11 @@ export interface ToolDeps {
   readonly mutations: MutationDeps;
   /** Fetch one issue from Linear into the mirror, for the case where an agent
    *  names an issue the poller has not seen. */
-  readonly refreshIssue: (idOrIdentifier: string, signal?: AbortSignal) => Promise<IssueRow | null>;
+  readonly refreshIssue: (
+    idOrIdentifier: string,
+    readTeamIds: readonly string[],
+    signal?: AbortSignal,
+  ) => Promise<IssueRow | null>;
   /** Manifest skill names to select. An **unknown** name rejects this
    *  plugin's whole selection for the resolution, so this is supplied by the
    *  caller that knows which skills actually shipped rather than assumed
@@ -78,6 +83,7 @@ export interface ToolDeps {
    *  `filterData` is opaque, so this is the only way to honour one. */
   readonly runView: (
     viewId: string,
+    readTeamIds: readonly string[],
     signal?: AbortSignal,
   ) => Promise<{ name: string; issues: IssueRow[] } | null>;
   /** Injected rather than imported so the tool layer stays testable without a
@@ -93,6 +99,7 @@ export interface ToolDeps {
   readonly bindThread: (
     threadId: string,
     idOrIdentifier: string | null,
+    projectId: string,
   ) => Promise<{ ok: boolean; message: string | null }>;
   readonly now: () => number;
 }
@@ -137,19 +144,38 @@ export const UNBOUND_INSTRUCTION =
   "This project isn't bound to a Linear team, so Linear tools are unavailable here. Bind it from the Linear plugin's settings.";
 
 export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
-  const context = (): IssueContext => ({
+  const context = (
+    teamIds: readonly string[],
+    issues: readonly IssueRow[] = [],
+    extraMemberIds: readonly string[] = [],
+  ): IssueContext => ({
     states: new Map(
-      deps.store
-        .teams()
+      teamIds
+        .map((teamId) => deps.store.team(teamId))
+        .filter((team): team is TeamRow => team !== null)
         .flatMap((team) => deps.store.workflowStates(team.id))
         .map((state) => [state.id, state]),
     ),
-    members: new Map(deps.store.members().map((member) => [member.id, member])),
-    labels: new Map(deps.store.labels([]).map((label) => [label.id, label])),
-    priorityLabels: new Map(
-      deps.store.priorityValues().map((value) => [value.priority, value.label]),
+    members: new Map(
+      deps.store
+        .membersByIds([
+          ...issues
+            .map((issue) => issue.assigneeId)
+            .filter((id): id is string => id !== null),
+          ...extraMemberIds,
+        ])
+        .map((member) => [member.id, member]),
     ),
-    teams: new Map(deps.store.teams().map((team) => [team.id, team])),
+    labels: new Map(deps.store.labels(teamIds).map((label) => [label.id, label])),
+    priorityLabels: new Map(
+      deps.store.priorityValues(teamIds).map((value) => [value.priority, value.label]),
+    ),
+    teams: new Map(
+      teamIds
+        .map((teamId) => deps.store.team(teamId))
+        .filter((team): team is TeamRow => team !== null)
+        .map((team) => [team.id, team]),
+    ),
   });
 
   const scope = (projectId: string): Scope => scopeFor(projectId, deps.bindings());
@@ -178,25 +204,21 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
       return primary;
     }
 
-    // In-scope teams first: when the project's own binding names this key,
-    // that team is what the caller means, whatever other workspaces call
-    // theirs. Only then the workspace-wide lookup — with ambiguity REFUSED,
-    // because two workspaces can both have an ENG and an arbitrary winner is
-    // how a wrong-refusal (or a wrong write) happens.
+    // Resolve only inside the project scope. Consulting the global mirror to
+    // improve an error message would disclose another workspace's team name.
     const lowered = teamKey.toLowerCase();
     const inScope = allowed.filter((team) => team.key.toLowerCase() === lowered);
     if (inScope.length === 1) return inScope[0]!;
 
-    const matches = inScope.length > 1 ? inScope : deps.store.teamsByKey(teamKey);
-    if (matches.length === 0) {
+    if (inScope.length === 0) {
       throw new Error(
-        `No team with key ${teamKey} is visible to this API key. Visible teams: ${
+        `No team with key ${teamKey} is in this project's Linear scope. Bound teams: ${
           allowed.map((team) => team.key).join(", ") || "none"
         }.`,
       );
     }
-    if (matches.length > 1) {
-      const sides = matches
+    if (inScope.length > 1) {
+      const sides = inScope
         .map(
           (team) =>
             `${team.name} in ${deps.store.workspaceForTeam(team.id)?.name ?? "an unknown workspace"}`,
@@ -206,19 +228,7 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
         `${teamKey} exists in more than one connected workspace — ${sides}. Say which team you mean by name, or ask the human to disambiguate.`,
       );
     }
-    const named = matches[0]!;
-    const permitted = action === "write" ? current.writeTeamIds : current.readTeamIds;
-    if (!permitted.includes(named.id)) {
-      throw new Error(
-        crossTeamRefusal({
-          identifier: `Team ${named.key}`,
-          targetTeam: { name: named.name, key: named.key },
-          allowed: allowed.map((team) => ({ name: team.name, key: team.key })),
-          action,
-        }),
-      );
-    }
-    return named;
+    return inScope[0]!;
   }
 
   /**
@@ -238,14 +248,14 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
     // Prefer an in-scope match, then refuse genuine ambiguity. ENG-42 can
     // exist in two connected workspaces, and an agent write that inherits
     // whichever row the index favours lands on the other company's board.
+    const permitted = action === "write" ? current.writeTeamIds : current.readTeamIds;
     let local = deps.store.issue(idOrIdentifier);
+    if (local !== null && !permitted.includes(local.teamId)) local = null;
     if (local === null) {
       const matches = deps.store.issuesByIdentifier(idOrIdentifier);
-      const permittedIds = action === "write" ? current.writeTeamIds : current.readTeamIds;
-      const inScope = matches.filter((row) => permittedIds.includes(row.teamId));
-      const candidates = inScope.length > 0 ? inScope : matches;
-      if (candidates.length > 1) {
-        const sides = candidates
+      const inScope = matches.filter((row) => permitted.includes(row.teamId));
+      if (inScope.length > 1) {
+        const sides = inScope
           .map(
             (row) =>
               `"${row.title}" in ${
@@ -257,14 +267,13 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
           `${idOrIdentifier} exists in more than one connected workspace — ${sides}. Nothing was changed; use the issue's id or URL instead of its identifier, or ask the human which they mean.`,
         );
       }
-      local = candidates[0] ?? null;
+      local = inScope[0] ?? null;
     }
-    const issue = local ?? (await deps.refreshIssue(idOrIdentifier, signal));
+    const issue = local ?? (await deps.refreshIssue(idOrIdentifier, permitted, signal));
     if (issue === null) {
       throw new Error(`No issue called ${idOrIdentifier}.`);
     }
 
-    const permitted = action === "write" ? current.writeTeamIds : current.readTeamIds;
     if (!permitted.includes(issue.teamId)) {
       const team = deps.store.team(issue.teamId);
       const allowed = permitted
@@ -308,8 +317,8 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
         team,
         states: deps.store.workflowStates(team.id),
         labels: deps.store.labels([team.id]),
-        members: deps.store.members().filter((member) => member.active && !member.isApp),
-        priorities: deps.store.priorityValues(),
+        members: deps.store.assignableMembers([team.id]),
+        priorities: deps.store.priorityValues([team.id]),
       });
     },
   });
@@ -344,14 +353,22 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
       // requests a minute *separately* from the hourly budget, and an agent
       // that reached for it by default would exhaust that in one loop.
       if (remote !== true) {
-        return listSummary(local, context(), "the teams this project is bound to");
+        return listSummary(
+          local,
+          context(current.readTeamIds, local),
+          "the teams this project is bound to",
+        );
       }
 
       const found = await deps.searchRemote(query, current.readTeamIds, ctx.signal);
       if (found === null) {
-        return `${listSummary(local, context(), "the teams this project is bound to")}\n\nLinear's own search could not be reached, so this is the local copy only.`;
+        return `${listSummary(local, context(current.readTeamIds, local), "the teams this project is bound to")}\n\nLinear's own search could not be reached, so this is the local copy only.`;
       }
-      return listSummary(found, context(), "Linear's own search of the bound teams");
+      return listSummary(
+        found,
+        context(current.readTeamIds, found),
+        "Linear's own search of the bound teams",
+      );
     },
   });
 
@@ -369,17 +386,18 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
     execute: async ({ issue }, ctx) => {
       const current = scope(ctx.projectId);
       const row = await resolveIssue(current, issue, "read", ctx.signal);
-      const children = deps.store
-        .queryIssues({
-          teamIds: current.readTeamIds,
-          includeCompleted: true,
-          sort: "manual",
-          limit: 50,
-        })
-        .filter((child) => child.parentId === row.id);
-      const states = context().states;
-      return issueDetailText(row, context(), {
-        comments: deps.store.comments(row.id),
+      const children = deps.store.childIssues(row.id, 50);
+      const comments = deps.store.comments(row.id);
+      const issueContext = context(
+        [row.teamId],
+        [row],
+        comments
+          .map((comment) => comment.userId)
+          .filter((id): id is string => id !== null),
+      );
+      const states = issueContext.states;
+      return issueDetailText(row, issueContext, {
+        comments,
         subIssues: children.map((child) => {
           const type = child.stateId === null ? "" : (states.get(child.stateId)?.type ?? "");
           return {
@@ -411,12 +429,13 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
       const current = scope(ctx.projectId);
       if (current.readTeamIds.length === 0) return UNBOUND_INSTRUCTION;
       const team = teamKey === undefined ? null : resolveTeam(current, teamKey, "read");
-      const viewer = deps.store.viewer();
+      const teamIds = team === null ? current.readTeamIds : [team.id];
+      const viewerIds = deps.store.viewers(teamIds).map((viewer) => viewer.id);
 
-      const issues = deps.store.queryIssues({
-        teamIds: team === null ? current.readTeamIds : [team.id],
+      const issues = assignee === "me" && viewerIds.length === 0 ? [] : deps.store.queryIssues({
+        teamIds,
         ...(stateType === undefined ? {} : { stateTypes: [stateType] }),
-        ...(assignee === "me" && viewer !== null ? { assigneeIds: [viewer.id] } : {}),
+        ...(assignee === "me" ? { assigneeIds: viewerIds } : {}),
         includeCompleted: stateType === "completed" || stateType === "canceled",
         sort: "updated",
         limit: limit ?? 30,
@@ -424,7 +443,11 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
 
       const filtered =
         assignee === "unassigned" ? issues.filter((issue) => issue.assigneeId === null) : issues;
-      return listSummary(filtered, context(), team === null ? "the bound teams" : team.name);
+      return listSummary(
+        filtered,
+        context(teamIds, filtered),
+        team === null ? "the bound teams" : team.name,
+      );
     },
   });
 
@@ -439,8 +462,16 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
       const projects = deps.store.projects(current.readTeamIds);
       if (projects.length === 0) return "The bound teams have no projects.";
 
-      const statuses = new Map(deps.store.projectStatuses().map((entry) => [entry.id, entry.name]));
-      const members = new Map(deps.store.members().map((entry) => [entry.id, entry]));
+      const statuses = new Map(deps.store.projectStatuses(current.readTeamIds).map((entry) => [entry.id, entry.name]));
+      const members = new Map(
+        deps.store
+          .membersByIds(
+            projects
+              .map((project) => project.leadId)
+              .filter((id): id is string => id !== null),
+          )
+          .map((entry) => [entry.id, entry]),
+      );
       return projects
         .map((entry) => {
           const parts = [
@@ -479,7 +510,7 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
       const name = cycle.name ?? `Cycle ${String(cycle.number)}`;
       const ends =
         cycle.endsAt === null ? "" : ` — ends ${new Date(cycle.endsAt).toISOString().slice(0, 10)}`;
-      return `${name}${ends}\n\n${listSummary(issues, context(), name)}`;
+      return `${name}${ends}\n\n${listSummary(issues, context([team.id], issues), name)}`;
     },
   });
 
@@ -495,7 +526,7 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
     execute: async ({ viewId }, ctx) => {
       const current = scope(ctx.projectId);
       if (current.readTeamIds.length === 0) return UNBOUND_INSTRUCTION;
-      const result = await deps.runView(viewId, ctx.signal);
+      const result = await deps.runView(viewId, current.readTeamIds, ctx.signal);
       if (result === null) return `No saved view with id ${viewId}, or it could not be read.`;
 
       // Filtered *after* Linear runs it: a saved view is workspace-wide and can
@@ -503,7 +534,11 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
       // same scoping promise every other read makes.
       const inScope = result.issues.filter((issue) => current.readTeamIds.includes(issue.teamId));
       const dropped = result.issues.length - inScope.length;
-      const summary = listSummary(inScope, context(), result.name);
+      const summary = listSummary(
+        inScope,
+        context(current.readTeamIds, inScope),
+        result.name,
+      );
       return dropped === 0
         ? summary
         : `${summary}\n\n${String(dropped)} more ${
@@ -612,7 +647,7 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
           `Couldn't update ${row.identifier}`,
         );
         const updated = deps.store.issue(row.id) ?? row;
-        return changeSummary(updated, context(), changed);
+        return changeSummary(updated, context([row.teamId], [updated]), changed);
       } catch (error) {
         return { content: [{ type: "text", text: describeError(error) }], isError: true };
       }
@@ -686,7 +721,7 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
     execute: async ({ issue, relatedIssue, type }, ctx) => {
       const current = scope(ctx.projectId);
       const from = await resolveIssue(current, issue, "write", ctx.signal);
-      const to = await resolveIssue(current, relatedIssue, "read", ctx.signal);
+      const to = await resolveIssue(current, relatedIssue, "write", ctx.signal);
       try {
         await relateIssues(deps.mutations, {
           issueId: from.id,
@@ -800,7 +835,7 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
           isError: true,
         };
       }
-      const result = await deps.bindThread(ctx.threadId, issue);
+      const result = await deps.bindThread(ctx.threadId, issue, ctx.projectId);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: result.message ?? "The binding was refused." }],
@@ -823,6 +858,10 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
     if (current.primaryTeamId === null) {
       return { tools: [], skills: [], instructions: UNBOUND_INSTRUCTION };
     }
-    return { tools: toolsFor(deps.agentWrites()), skills: deps.skills() };
+    return {
+      tools: toolsFor(deps.agentWrites()),
+      skills: deps.skills(),
+      instructions: UNTRUSTED_LINEAR_POLICY,
+    };
   });
 }

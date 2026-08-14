@@ -187,9 +187,15 @@ describe("the read circuit breaker", () => {
     expect(fake.requests.length).toBe(before); // refused without a request
     expect(transport.breaker().open).toBe(true);
 
-    // One warn per outage, debug thereafter — a log flood is itself a
-    // performance failure and `bb plugin logs` rotates at 5 MB.
+    // One warning records the outage. Every gated poll after that is the same
+    // event, not a new diagnostic line; otherwise a long outage rotates away
+    // the line that explains why the breaker opened.
     expect(logs.filter((line) => line.startsWith("warn:"))).toHaveLength(1);
+    const logCount = logs.length;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await transport.execute(QUERY).catch(() => undefined);
+    }
+    expect(logs).toHaveLength(logCount);
   });
 
   it("leaves mutations ungated, because a person is asking", async () => {

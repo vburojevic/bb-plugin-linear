@@ -119,6 +119,8 @@ export function describeConnection(state: ConnectionState): string {
   switch (state.kind) {
     case "no-credential":
       return "not connected — no API key";
+    case "checking":
+      return "checking the connection";
     case "connected":
       return `connected as ${state.viewer.displayName} in ${state.workspace.name}`;
     case "invalid-key":

@@ -48,6 +48,8 @@ function connectionHeadline(state: ConnectionState): string {
   switch (state.kind) {
     case "connected":
       return "Linear · connected";
+    case "checking":
+      return "Linear · checking";
     case "no-credential":
       return "Linear · not connected";
     case "rate-limited":
@@ -130,7 +132,9 @@ export function renderStatus(report: StatusReport): string {
 
   const body = definitionList(lines);
   const problem =
-    connection.kind === "connected" || connection.kind === "no-credential"
+    connection.kind === "connected" ||
+    connection.kind === "no-credential" ||
+    connection.kind === "checking"
       ? ""
       : `\n\n${connection.message}`;
   const hint =

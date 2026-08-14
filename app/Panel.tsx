@@ -13,7 +13,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import type { IssueRowView, PanelView, Sort, WorkingSetView } from "../src/contract.js";
-import { chrome, hasActiveFilters, hydrateSort, usePanelChrome } from "../src/panel-chrome.js";
+import {
+  chrome,
+  hasActiveFilters,
+  hydrateSort,
+  loadsForSegment,
+  usePanelChrome,
+} from "../src/panel-chrome.js";
 import { joinSentence, pluralize } from "../src/format.js";
 import { toast } from "sonner";
 import { IssueDetail } from "./Detail.js";
@@ -53,6 +59,8 @@ export function LinearPanel({ subPath }: { subPath: string }) {
   // `/i/ENG-123` opens an issue. Parsed rather than trusted — it round-trips
   // through the address bar.
   const deepLink = parseSubPath(subPath);
+  const loads = loadsForSegment(state.segment);
+  const debouncedSearch = useDebouncedValue(state.search, 180);
 
   const working = useAsync(
     useCallback(
@@ -60,6 +68,7 @@ export function LinearPanel({ subPath }: { subPath: string }) {
       [rpc, deepLink.teamKey, state.teamId],
     ),
     [deepLink.teamKey, state.teamId],
+    loads.working,
   );
 
   const panel = useAsync(
@@ -69,7 +78,7 @@ export function LinearPanel({ subPath }: { subPath: string }) {
           team: deepLink.teamKey ?? state.teamId,
           grouping: state.grouping,
           sort: state.sort,
-          search: state.search,
+          search: debouncedSearch,
           filters: state.filters,
         }),
       [
@@ -78,7 +87,7 @@ export function LinearPanel({ subPath }: { subPath: string }) {
         state.teamId,
         state.grouping,
         state.sort,
-        state.search,
+        debouncedSearch,
         state.filters,
       ],
     ),
@@ -87,24 +96,38 @@ export function LinearPanel({ subPath }: { subPath: string }) {
       state.teamId,
       state.grouping,
       state.sort,
-      state.search,
+      debouncedSearch,
       JSON.stringify(state.filters),
     ],
+    loads.panel,
   );
 
-  // The poller publishes a bare `{ at }` signal; the payload never travels
-  // over realtime. Refetching here is what turns one signal into current data
-  // without the server having to know what this surface is showing.
-  useRealtime("linear:data", panel.reload);
-  useRealtime("linear:data", working.reload);
+  // The poller publishes a bare `{ at }` signal; reload only the visible
+  // projection. Updating a disabled hook still costs a render even though it
+  // correctly skips the rpc call.
+  const reloadVisible = useCallback(() => {
+    if (loads.panel) panel.reload();
+    if (loads.working) working.reload();
+  }, [loads.panel, loads.working, panel.reload, working.reload]);
+  useRealtime("linear:data", reloadVisible);
 
-  const rows = useMemo(
-    () =>
-      panel.status === "ready" && panel.value.state.kind === "rows"
-        ? panel.value.state.groups.flatMap((group) => group.rows)
-        : [],
-    [panel],
-  );
+  const rows = useMemo(() => {
+    if (
+      state.segment === "working" &&
+      working.status === "ready" &&
+      working.value.view.kind === "buckets"
+    ) {
+      return working.value.view.buckets.flatMap((bucket) => bucket.rows);
+    }
+    if (
+      state.segment === "all" &&
+      panel.status === "ready" &&
+      panel.value.state.kind === "rows"
+    ) {
+      return panel.value.state.groups.flatMap((group) => group.rows);
+    }
+    return [];
+  }, [panel, state.segment, working]);
 
   const open = useCallback(
     (id: string) => {
@@ -223,7 +246,7 @@ export function LinearPanel({ subPath }: { subPath: string }) {
     return () => element.removeEventListener("keydown", onKeyDown);
   }, [rows, selected, open]);
 
-  if (panel.status === "loading") {
+  if (loads.panel && panel.status === "loading") {
     // Skeletons appear only when a surface has never had cached rows. Once the
     // mirror has anything, the mirror renders and staleness is stated in
     // words — a spinner over data you already have is a lie about what you
@@ -231,7 +254,7 @@ export function LinearPanel({ subPath }: { subPath: string }) {
     return <SkeletonList />;
   }
 
-  if (panel.status === "failed") {
+  if (loads.panel && panel.status === "failed") {
     return (
       <Body>
         <Notice tone="error">{panel.message}</Notice>
@@ -240,6 +263,12 @@ export function LinearPanel({ subPath }: { subPath: string }) {
   }
 
   const openIssue = deepLink.identifier;
+  const notice =
+    state.segment === "all" && panel.status === "ready"
+      ? panel.value.notice
+      : state.segment === "working" && working.status === "ready"
+        ? working.value.notice
+        : null;
 
   return (
     <div className="flex h-full min-h-0">
@@ -247,9 +276,9 @@ export function LinearPanel({ subPath }: { subPath: string }) {
         <Segments />
 
         {/* Failure-first: above the list, never inside it. */}
-        {panel.value.notice !== null ? (
+        {notice !== null ? (
           <div className="px-3 pt-3">
-            <Notice tone={panel.value.notice.tone}>{panel.value.notice.message}</Notice>
+            <Notice tone={notice.tone}>{notice.message}</Notice>
           </div>
         ) : null}
 
@@ -257,7 +286,7 @@ export function LinearPanel({ subPath }: { subPath: string }) {
           <InboxSegment />
         ) : state.segment === "working" ? (
           <WorkingSet view={working} onOpen={open} actions={actions} />
-        ) : (
+        ) : panel.status === "ready" ? (
           <PanelBody
             view={panel.value}
             selected={selected}
@@ -266,6 +295,8 @@ export function LinearPanel({ subPath }: { subPath: string }) {
             collapsed={state.collapsed}
             actions={actions}
           />
+        ) : (
+          <SkeletonList />
         )}
       </div>
 
@@ -291,6 +322,15 @@ export function LinearPanel({ subPath }: { subPath: string }) {
       />
     </div>
   );
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delayMs);
+    return () => clearTimeout(timer);
+  }, [value, delayMs]);
+  return debounced;
 }
 
 /**

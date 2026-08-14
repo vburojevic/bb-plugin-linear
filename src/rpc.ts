@@ -111,5 +111,6 @@ export const serverRpcContract = defineRpcContract({
   archiveIssue: legacyContract.archiveIssue,
   startThread: legacyContract.startThread,
   inbox: legacyContract.inbox,
+  inboxSummary: legacyContract.inboxSummary,
   dismissInbox: legacyContract.dismissInbox,
 });

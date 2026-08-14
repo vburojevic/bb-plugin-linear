@@ -220,6 +220,30 @@ describe("applyTeamGraph", () => {
     );
     expect(store.workflowStates("t_0")).toHaveLength(1);
   });
+
+  it("replaces the workspace's active member snapshot", async () => {
+    const store = createTestStore();
+    applyBootstrap(store, bootstrapPage(1), NOW, "apiKey");
+    store.putMembers([
+      {
+        id: "u_departed",
+        workspaceId: "org_1",
+        name: "departed",
+        displayName: "Departed Person",
+        email: "departed@example.invalid",
+        avatarUrl: null,
+        active: true,
+        isApp: false,
+        isMe: false,
+        updatedAt: NOW,
+      },
+    ]);
+
+    const graph = await fakeClient().teamGraph(["t_0"]);
+    applyTeamGraph(store, graph, ["t_0"], NOW + 1);
+
+    expect(store.members(["t_0"]).map((entry) => entry.id)).toEqual(["u_me"]);
+  });
 });
 
 describe("toIssueInput", () => {

@@ -208,22 +208,34 @@ export interface Store {
   labels(teamIds: readonly string[]): LabelRow[];
 
   putMembers(members: readonly MemberRow[]): void;
+  /** Replace one workspace's active-user snapshot. Linear's active-users
+   *  query has no tombstones, so an upsert cannot express a departure. */
+  replaceWorkspaceMembers(workspaceId: string, members: readonly MemberRow[]): void;
   /** Replaced wholesale, because a removal cannot be expressed as an upsert. */
   replaceTeamMembers(teamId: string, userIds: readonly string[]): void;
   /** Empty when membership has never been read for this team — the caller
    *  falls back to the workspace list rather than offering nobody. */
   teamMemberIds(teamId: string): string[];
-  members(): MemberRow[];
-  viewer(): MemberRow | null;
+  /** Omit team ids for the global UI; pass them on every project-scoped surface. */
+  members(teamIds?: readonly string[]): MemberRow[];
+  membersByIds(ids: readonly string[]): MemberRow[];
+  /** Team membership where known; workspace membership only for teams whose
+   * membership graph has not been fetched yet. */
+  assignableMembers(teamIds: readonly string[]): MemberRow[];
+  viewers(teamIds?: readonly string[]): MemberRow[];
+  viewer(teamIds?: readonly string[]): MemberRow | null;
 
-  replaceProjectStatuses(statuses: readonly ProjectStatusRow[]): void;
-  projectStatuses(): ProjectStatusRow[];
+  replaceProjectStatuses(statuses: readonly ProjectStatusRow[], workspaceId?: string): void;
+  projectStatuses(teamIds?: readonly string[]): ProjectStatusRow[];
 
-  replacePriorityValues(values: readonly PriorityValueRow[]): void;
-  priorityValues(): PriorityValueRow[];
+  replacePriorityValues(values: readonly PriorityValueRow[], workspaceId?: string): void;
+  priorityValues(teamIds?: readonly string[]): PriorityValueRow[];
 
   putIssues(issues: readonly IssueInput[], at: number): void;
   issue(id: string): IssueRow | null;
+  /** Batch lookup for hot projections. One inbox page must not become one
+   * SQLite statement per notification. */
+  issuesByIds(ids: readonly string[]): IssueRow[];
   issueByIdentifier(identifier: string): IssueRow | null;
   /** Every identifier match — for writers that must refuse a cross-workspace
    *  collision rather than pick an arbitrary winner. */
@@ -232,6 +244,7 @@ export interface Store {
   queryIssues(query: IssueQuery): IssueRow[];
   countIssues(filter: IssueFilter): number;
   deleteIssues(ids: readonly string[]): void;
+  childIssues(parentId: string, limit: number): IssueRow[];
   putPreviousIdentifiers(issueId: string, identifiers: readonly string[]): void;
   /** Sub-issue progress for a page of rows, in one query rather than one per
    *  row: a forty-row page would otherwise be forty round trips through
@@ -262,6 +275,7 @@ export interface Store {
   markInboxSeen(keys: readonly string[], at: number): void;
   dismissInbox(keys: readonly string[], at: number): void;
   unseenInboxCount(): number;
+  pruneInbox(olderThan: number, limit: number): number;
 
   /** `INSERT OR IGNORE`; true only if this call won the row. Claim then send
    *  is at most once, which is the better failure than at least once. */
@@ -309,6 +323,7 @@ export interface Store {
   linkThread(row: ThreadLinkRow): void;
   unlinkThread(threadId: string): void;
   threadLink(threadId: string): ThreadLinkRow | null;
+  threadLinksByThreadIds(threadIds: readonly string[]): ThreadLinkRow[];
   threadLinksForIssues(issueIds: readonly string[]): ThreadLinkRow[];
 
   bindings(): BindingRow[];
@@ -327,6 +342,40 @@ export interface Store {
 
 export function createStore(db: Database): Store {
   const placeholders = (count: number) => Array.from({ length: count }, () => "?").join(", ");
+  const LEGACY_WORKSPACE_ID = "__legacy__";
+
+  const primaryWorkspaceId = (): string | null =>
+    (
+      db
+        .prepare(`SELECT id FROM workspace ORDER BY slot = 'apiKey' DESC, slot LIMIT 1`)
+        .get() as { id: string } | undefined
+    )?.id ?? null;
+
+  const workspaceIdForTeam = (teamId: string): string =>
+    (
+      db.prepare(`SELECT workspace_id AS workspaceId FROM team WHERE id = ?`).get(teamId) as
+        | { workspaceId: string | null }
+        | undefined
+    )?.workspaceId ?? primaryWorkspaceId() ?? LEGACY_WORKSPACE_ID;
+
+  /** Empty/omitted means every workspace for global UI surfaces. */
+  const workspaceIdsForTeams = (teamIds?: readonly string[]): string[] => {
+    if (teamIds === undefined || teamIds.length === 0) {
+      const ids = (
+        db
+          .prepare(`SELECT id FROM workspace ORDER BY slot = 'apiKey' DESC, slot`)
+          .all() as { id: string }[]
+      ).map((row) => row.id);
+      return [...new Set([...ids, LEGACY_WORKSPACE_ID])];
+    }
+    return [...new Set(teamIds.map(workspaceIdForTeam))];
+  };
+
+  const inputWorkspaceId = (explicit: string | undefined, teamId?: string | null): string =>
+    explicit ??
+    (teamId === undefined || teamId === null ? null : workspaceIdForTeam(teamId)) ??
+    primaryWorkspaceId() ??
+    LEGACY_WORKSPACE_ID;
 
   const putIssueStatement = db.prepare(`
     INSERT INTO issue (
@@ -460,16 +509,28 @@ export function createStore(db: Database): Store {
     /* ── Identity ────────────────────────────────────────────────────────── */
 
     putWorkspace(row, at) {
-      db.prepare(
-        `INSERT INTO workspace (id, slot, name, url_key, viewer_id, viewer_name, git_branch_format, fetched_at)
-         VALUES (@id, @slot, @name, @urlKey, @viewerId, @viewerName, @gitBranchFormat, @fetchedAt)
-         ON CONFLICT(id) DO UPDATE SET
-           slot = excluded.slot,
-           name = excluded.name, url_key = excluded.url_key,
-           viewer_id = excluded.viewer_id, viewer_name = excluded.viewer_name,
-           git_branch_format = excluded.git_branch_format,
-           fetched_at = excluded.fetched_at`,
-      ).run({ ...row, fetchedAt: at });
+      const first =
+        (db.prepare(`SELECT COUNT(*) AS count FROM workspace`).get() as { count: number }).count === 0;
+      db.transaction(() => {
+        db.prepare(
+          `INSERT INTO workspace (id, slot, name, url_key, viewer_id, viewer_name, git_branch_format, fetched_at)
+           VALUES (@id, @slot, @name, @urlKey, @viewerId, @viewerName, @gitBranchFormat, @fetchedAt)
+           ON CONFLICT(id) DO UPDATE SET
+             slot = excluded.slot,
+             name = excluded.name, url_key = excluded.url_key,
+             viewer_id = excluded.viewer_id, viewer_name = excluded.viewer_name,
+             git_branch_format = excluded.git_branch_format,
+             fetched_at = excluded.fetched_at`,
+        ).run({ ...row, fetchedAt: at });
+        if (first) {
+          for (const table of ["workspace_label", "workspace_member", "workspace_project_status", "workspace_priority_value"]) {
+            db.prepare(`UPDATE ${table} SET workspace_id = ? WHERE workspace_id = ?`).run(
+              row.id,
+              LEGACY_WORKSPACE_ID,
+            );
+          }
+        }
+      })();
     },
 
     workspace() {
@@ -547,8 +608,10 @@ export function createStore(db: Database): Store {
             `DELETE FROM issue_previous_identifier
               WHERE issue_id IN (SELECT id FROM issue WHERE team_id IN (${marks}))`,
           ).run(...teamIds);
+          db.prepare(
+            `DELETE FROM echo WHERE entity_id IN (SELECT id FROM issue WHERE team_id IN (${marks}))`,
+          ).run(...teamIds);
           db.prepare(`DELETE FROM issue WHERE team_id IN (${marks})`).run(...teamIds);
-          db.prepare(`DELETE FROM inbox WHERE team_id IN (${marks})`).run(...teamIds);
           db.prepare(`DELETE FROM workflow_state WHERE team_id IN (${marks})`).run(...teamIds);
           db.prepare(`DELETE FROM label WHERE team_id IN (${marks})`).run(...teamIds);
           db.prepare(`DELETE FROM cycle WHERE team_id IN (${marks})`).run(...teamIds);
@@ -558,11 +621,40 @@ export function createStore(db: Database): Store {
           );
           db.prepare(`DELETE FROM project_team WHERE team_id IN (${marks})`).run(...teamIds);
         }
+        db.prepare(`DELETE FROM inbox WHERE workspace_id = ?`).run(workspaceId);
+        // Projects have many team links but no workspace column. Once every
+        // link owned by this workspace is gone, an unlinked project and all of
+        // its milestones are remote metadata with no remaining owner.
+        db.prepare(`DELETE FROM milestone WHERE project_id IN (
+          SELECT project.id FROM project WHERE NOT EXISTS (
+            SELECT 1 FROM project_team WHERE project_team.project_id = project.id
+          )
+        )`).run();
+        db.prepare(`DELETE FROM project WHERE NOT EXISTS (
+          SELECT 1 FROM project_team WHERE project_team.project_id = project.id
+        )`).run();
         if (teamIds.length > 0) {
           db.prepare(`DELETE FROM team WHERE id IN (${placeholders(teamIds.length)})`).run(
             ...teamIds,
           );
         }
+        db.prepare(`DELETE FROM workspace_label WHERE workspace_id = ?`).run(workspaceId);
+        db.prepare(`DELETE FROM workspace_member WHERE workspace_id = ?`).run(workspaceId);
+        db.prepare(`DELETE FROM workspace_project_status WHERE workspace_id = ?`).run(workspaceId);
+        db.prepare(`DELETE FROM workspace_priority_value WHERE workspace_id = ?`).run(workspaceId);
+        db.prepare(`DELETE FROM label WHERE NOT EXISTS (
+          SELECT 1 FROM workspace_label WHERE workspace_label.label_id = label.id
+        )`).run();
+        db.prepare(`DELETE FROM member WHERE NOT EXISTS (
+          SELECT 1 FROM workspace_member WHERE workspace_member.user_id = member.id
+        )`).run();
+        db.prepare(`DELETE FROM project_status WHERE NOT EXISTS (
+          SELECT 1 FROM workspace_project_status WHERE workspace_project_status.status_id = project_status.id
+        )`).run();
+        // The legacy table has no owner column. New code never reads it, and
+        // retaining it after any workspace disconnect would keep data whose
+        // workspace can no longer be proven.
+        db.prepare(`DELETE FROM priority_value`).run();
         db.prepare(`DELETE FROM workspace WHERE id = ?`).run(workspaceId);
         return teamIds;
       })();
@@ -707,8 +799,20 @@ export function createStore(db: Database): Store {
            parent_id = excluded.parent_id, is_group = excluded.is_group,
            updated_at = excluded.updated_at`,
       );
+      const ownership = db.prepare(
+        `INSERT OR IGNORE INTO workspace_label (workspace_id, label_id) VALUES (?, ?)`,
+      );
+      const removeStale = db.prepare(
+        `DELETE FROM workspace_label WHERE label_id = ? AND workspace_id != ?`,
+      );
       db.transaction(() => {
-        for (const label of labels) statement.run({ ...label, isGroup: toInt(label.isGroup) });
+        for (const label of labels) {
+          const workspaceId = inputWorkspaceId(label.workspaceId, label.teamId);
+          const { workspaceId: _workspaceId, ...row } = label;
+          statement.run({ ...row, isGroup: toInt(label.isGroup) });
+          removeStale.run(label.id, workspaceId);
+          ownership.run(workspaceId, label.id);
+        }
       })();
     },
 
@@ -716,15 +820,22 @@ export function createStore(db: Database): Store {
       // Workspace-level labels (`team_id IS NULL`) always come along: they are
       // usable on every team, and a picker that omitted them would be missing
       // the labels an organisation standardised on.
+      const workspaceIds = workspaceIdsForTeams(teamIds);
       const rows = db
         .prepare(
-          `SELECT id, team_id AS teamId, name, color, parent_id AS parentId,
-                  is_group AS isGroup, updated_at AS updatedAt
-             FROM label
-            WHERE team_id IS NULL ${teamIds.length > 0 ? `OR team_id IN (${placeholders(teamIds.length)})` : ""}
-            ORDER BY name`,
+          `SELECT DISTINCT label.id, label.team_id AS teamId, label.name, label.color,
+                  label.parent_id AS parentId, label.is_group AS isGroup,
+                  label.updated_at AS updatedAt
+             FROM label JOIN workspace_label ON workspace_label.label_id = label.id
+            WHERE ${
+              teamIds.length > 0
+                ? `(label.team_id IN (${placeholders(teamIds.length)}) OR
+                    (label.team_id IS NULL AND workspace_label.workspace_id IN (${placeholders(workspaceIds.length)})))`
+                : `label.team_id IS NULL AND workspace_label.workspace_id IN (${placeholders(workspaceIds.length)})`
+            }
+            ORDER BY label.name`,
         )
-        .all(...teamIds) as RawLabel[];
+        .all(...teamIds, ...workspaceIds) as RawLabel[];
       return rows.map((row) => ({ ...row, isGroup: bool(row.isGroup) }));
     },
 
@@ -756,71 +867,211 @@ export function createStore(db: Database): Store {
            active = excluded.active, is_app = excluded.is_app,
            is_me = excluded.is_me, updated_at = excluded.updated_at`,
       );
+      const ownership = db.prepare(
+        `INSERT OR IGNORE INTO workspace_member (workspace_id, user_id) VALUES (?, ?)`,
+      );
       db.transaction(() => {
         for (const member of members) {
+          const workspaceId = inputWorkspaceId(member.workspaceId);
+          const { workspaceId: _workspaceId, ...row } = member;
           statement.run({
-            ...member,
+            ...row,
             active: toInt(member.active),
             isApp: toInt(member.isApp),
             isMe: toInt(member.isMe),
           });
+          ownership.run(workspaceId, member.id);
         }
       })();
     },
 
-    members() {
+    replaceWorkspaceMembers(workspaceId, members) {
+      const statement = db.prepare(
+        `INSERT INTO member (id, name, display_name, email, avatar_url, active, is_app, is_me, updated_at)
+         VALUES (@id, @name, @displayName, @email, @avatarUrl, @active, @isApp, @isMe, @updatedAt)
+         ON CONFLICT(id) DO UPDATE SET
+           name = excluded.name, display_name = excluded.display_name,
+           email = excluded.email, avatar_url = excluded.avatar_url,
+           active = excluded.active, is_app = excluded.is_app,
+           is_me = excluded.is_me, updated_at = excluded.updated_at`,
+      );
+      const ownership = db.prepare(
+        `INSERT OR IGNORE INTO workspace_member (workspace_id, user_id) VALUES (?, ?)`,
+      );
+      db.transaction(() => {
+        db.prepare(`DELETE FROM workspace_member WHERE workspace_id = ?`).run(workspaceId);
+        for (const member of members) {
+          const { workspaceId: _workspaceId, ...row } = member;
+          statement.run({
+            ...row,
+            active: toInt(member.active),
+            isApp: toInt(member.isApp),
+            isMe: toInt(member.isMe),
+          });
+          ownership.run(workspaceId, member.id);
+        }
+        db.prepare(`DELETE FROM member WHERE NOT EXISTS (
+          SELECT 1 FROM workspace_member WHERE workspace_member.user_id = member.id
+        )`).run();
+      })();
+    },
+
+    members(teamIds) {
+      const workspaceIds = workspaceIdsForTeams(teamIds);
+      const rows = db
+        .prepare(
+          `SELECT DISTINCT member.id, member.name, member.display_name AS displayName,
+                  member.email, member.avatar_url AS avatarUrl, member.active,
+                  member.is_app AS isApp, member.is_me AS isMe,
+                  member.updated_at AS updatedAt
+             FROM member JOIN workspace_member ON workspace_member.user_id = member.id
+            WHERE workspace_member.workspace_id IN (${placeholders(workspaceIds.length)})
+            ORDER BY member.display_name`,
+        )
+        .all(...workspaceIds) as RawMember[];
+      return rows.map(hydrateMember);
+    },
+
+    membersByIds(ids) {
+      if (ids.length === 0) return [];
       const rows = db
         .prepare(
           `SELECT id, name, display_name AS displayName, email, avatar_url AS avatarUrl,
                   active, is_app AS isApp, is_me AS isMe, updated_at AS updatedAt
-             FROM member ORDER BY display_name`,
+             FROM member WHERE id IN (${placeholders(ids.length)})
+            ORDER BY display_name`,
         )
-        .all() as RawMember[];
+        .all(...ids) as RawMember[];
       return rows.map(hydrateMember);
     },
 
-    viewer() {
-      const row = db
+    assignableMembers(teamIds) {
+      if (teamIds.length === 0) return [];
+      const memberships = db
         .prepare(
-          `SELECT id, name, display_name AS displayName, email, avatar_url AS avatarUrl,
-                  active, is_app AS isApp, is_me AS isMe, updated_at AS updatedAt
-             FROM member WHERE is_me = 1 LIMIT 1`,
+          `SELECT team_id AS teamId, user_id AS userId
+             FROM team_member WHERE team_id IN (${placeholders(teamIds.length)})`,
         )
-        .get() as RawMember | undefined;
-      return row === undefined ? null : hydrateMember(row);
+        .all(...teamIds) as { teamId: string; userId: string }[];
+      const populatedTeams = new Set(memberships.map((row) => row.teamId));
+      const fallbackTeams = teamIds.filter((teamId) => !populatedTeams.has(teamId));
+      const byId = new Map(
+        this.membersByIds([...new Set(memberships.map((row) => row.userId))])
+          .filter((member) => member.active && !member.isApp)
+          .map((member) => [member.id, member] as const),
+      );
+      if (fallbackTeams.length > 0) {
+        for (const member of this.members(fallbackTeams)) {
+          if (member.active && !member.isApp) byId.set(member.id, member);
+        }
+      }
+      return [...byId.values()].sort((a, b) => a.displayName.localeCompare(b.displayName));
     },
 
-    replaceProjectStatuses(statuses) {
+    viewers(teamIds) {
+      const workspaceIds = workspaceIdsForTeams(teamIds);
+      const viewerIds = new Set(
+        (
+          db
+            .prepare(
+              `SELECT viewer_id AS viewerId FROM workspace
+                WHERE id IN (${placeholders(workspaceIds.length)})`,
+            )
+            .all(...workspaceIds) as { viewerId: string }[]
+        ).map((row) => row.viewerId),
+      );
+      return this.members(teamIds).filter(
+        (member) => viewerIds.has(member.id) || (workspaceIds.includes(LEGACY_WORKSPACE_ID) && member.isMe),
+      );
+    },
+
+    viewer(teamIds) {
+      return this.viewers(teamIds)[0] ?? null;
+    },
+
+    replaceProjectStatuses(statuses, explicitWorkspaceId) {
+      const workspaceIds = new Set(
+        statuses.map((status) => inputWorkspaceId(status.workspaceId ?? explicitWorkspaceId)),
+      );
+      if (explicitWorkspaceId !== undefined) workspaceIds.add(explicitWorkspaceId);
       db.transaction(() => {
-        db.prepare(`DELETE FROM project_status`).run();
+        for (const workspaceId of workspaceIds) {
+          db.prepare(`DELETE FROM workspace_project_status WHERE workspace_id = ?`).run(workspaceId);
+        }
         const statement = db.prepare(
           `INSERT INTO project_status (id, name, type, position, color)
-           VALUES (@id, @name, @type, @position, @color)`,
+           VALUES (@id, @name, @type, @position, @color)
+           ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type,
+             position = excluded.position, color = excluded.color`,
         );
-        for (const status of statuses) statement.run(status);
+        const ownership = db.prepare(
+          `INSERT OR IGNORE INTO workspace_project_status (workspace_id, status_id) VALUES (?, ?)`,
+        );
+        const removeStale = db.prepare(
+          `DELETE FROM workspace_project_status WHERE status_id = ? AND workspace_id != ?`,
+        );
+        for (const status of statuses) {
+          const workspaceId = inputWorkspaceId(status.workspaceId ?? explicitWorkspaceId);
+          const { workspaceId: _workspaceId, ...row } = status;
+          statement.run(row);
+          removeStale.run(status.id, workspaceId);
+          ownership.run(workspaceId, status.id);
+        }
+        db.prepare(`DELETE FROM project_status WHERE NOT EXISTS (
+          SELECT 1 FROM workspace_project_status WHERE workspace_project_status.status_id = project_status.id
+        )`).run();
       })();
     },
 
-    projectStatuses() {
+    projectStatuses(teamIds) {
+      const workspaceIds = workspaceIdsForTeams(teamIds);
       return db
-        .prepare(`SELECT id, name, type, position, color FROM project_status ORDER BY position`)
-        .all() as ProjectStatusRow[];
+        .prepare(
+          `SELECT DISTINCT project_status.id, project_status.name, project_status.type,
+                  project_status.position, project_status.color
+             FROM project_status
+             JOIN workspace_project_status
+               ON workspace_project_status.status_id = project_status.id
+            WHERE workspace_project_status.workspace_id IN (${placeholders(workspaceIds.length)})
+            ORDER BY project_status.position`,
+        )
+        .all(...workspaceIds) as ProjectStatusRow[];
     },
 
-    replacePriorityValues(values) {
+    replacePriorityValues(values, explicitWorkspaceId) {
+      const workspaceIds = new Set(
+        values.map((value) => inputWorkspaceId(value.workspaceId ?? explicitWorkspaceId)),
+      );
+      if (explicitWorkspaceId !== undefined) workspaceIds.add(explicitWorkspaceId);
       db.transaction(() => {
-        db.prepare(`DELETE FROM priority_value`).run();
         const statement = db.prepare(
-          `INSERT INTO priority_value (priority, label) VALUES (@priority, @label)`,
+          `INSERT INTO workspace_priority_value (workspace_id, priority, label)
+           VALUES (@workspaceId, @priority, @label)
+           ON CONFLICT(workspace_id, priority) DO UPDATE SET label = excluded.label`,
         );
-        for (const value of values) statement.run(value);
+        for (const workspaceId of workspaceIds) {
+          db.prepare(`DELETE FROM workspace_priority_value WHERE workspace_id = ?`).run(workspaceId);
+        }
+        for (const value of values) {
+          statement.run({
+            workspaceId: inputWorkspaceId(value.workspaceId ?? explicitWorkspaceId),
+            priority: value.priority,
+            label: value.label,
+          });
+        }
+
       })();
     },
 
-    priorityValues() {
+    priorityValues(teamIds) {
+      const workspaceIds = workspaceIdsForTeams(teamIds);
       return db
-        .prepare(`SELECT priority, label FROM priority_value ORDER BY priority`)
-        .all() as PriorityValueRow[];
+        .prepare(
+          `SELECT priority, label FROM workspace_priority_value
+            WHERE workspace_id IN (${placeholders(workspaceIds.length)})
+            ORDER BY priority, workspace_id`,
+        )
+        .all(...workspaceIds) as PriorityValueRow[];
     },
 
     /* ── Issues ──────────────────────────────────────────────────────────── */
@@ -834,6 +1085,15 @@ export function createStore(db: Database): Store {
         | RawIssue
         | undefined;
       return row === undefined ? null : toIssue(row);
+    },
+
+    issuesByIds(ids) {
+      if (ids.length === 0) return [];
+      return (
+        db
+          .prepare(`SELECT ${ISSUE_COLUMNS} FROM issue WHERE id IN (${placeholders(ids.length)})`)
+          .all(...ids) as RawIssue[]
+      ).map(toIssue);
     },
 
     issueByIdentifier(identifier) {
@@ -923,6 +1183,20 @@ export function createStore(db: Database): Store {
       })();
     },
 
+    childIssues(parentId, limit) {
+      if (limit <= 0) return [];
+      return (
+        db
+          .prepare(
+            `SELECT ${ISSUE_COLUMNS} FROM issue
+              WHERE parent_id = ? AND archived_at IS NULL
+              ORDER BY sub_issue_sort_order IS NULL, sub_issue_sort_order, sort_order, id
+              LIMIT ?`,
+          )
+          .all(parentId, Math.floor(limit)) as RawIssue[]
+      ).map(toIssue);
+    },
+
     subIssueProgress(parentIds) {
       const progress = new Map<string, { done: number; total: number }>();
       if (parentIds.length === 0) return progress;
@@ -1005,12 +1279,13 @@ export function createStore(db: Database): Store {
 
     putInbox(rows) {
       const statement = db.prepare(
-        `INSERT INTO inbox (key, kind, issue_id, team_id, actor_id, title, body, url,
+        `INSERT INTO inbox (key, workspace_id, kind, issue_id, team_id, actor_id, title, body, url,
                             created_at, seen_at, dismissed_at, linear_read_at)
-         VALUES (@key, @kind, @issueId, @teamId, @actorId, @title, @body, @url,
+         VALUES (@key, @workspaceId, @kind, @issueId, @teamId, @actorId, @title, @body, @url,
                  @createdAt, @seenAt, @dismissedAt, @linearReadAt)
          ON CONFLICT(key) DO UPDATE SET
-           kind = excluded.kind, issue_id = excluded.issue_id,
+           workspace_id = excluded.workspace_id, kind = excluded.kind,
+           issue_id = excluded.issue_id,
            team_id = excluded.team_id, actor_id = excluded.actor_id,
            title = excluded.title, body = excluded.body, url = excluded.url,
            created_at = excluded.created_at,
@@ -1025,7 +1300,8 @@ export function createStore(db: Database): Store {
       const where = options?.includeDismissed === true ? "" : "WHERE dismissed_at IS NULL";
       return db
         .prepare(
-          `SELECT key, kind, issue_id AS issueId, team_id AS teamId, actor_id AS actorId,
+          `SELECT key, workspace_id AS workspaceId, kind,
+                  issue_id AS issueId, team_id AS teamId, actor_id AS actorId,
                   title, body, url, created_at AS createdAt, seen_at AS seenAt,
                   dismissed_at AS dismissedAt, linear_read_at AS linearReadAt
              FROM inbox ${where}
@@ -1057,6 +1333,20 @@ export function createStore(db: Database): Store {
         )
         .get() as { n: number };
       return row.n;
+    },
+
+    pruneInbox(olderThan, limit) {
+      if (limit <= 0) return 0;
+      return db
+        .prepare(
+          `DELETE FROM inbox WHERE key IN (
+             SELECT key FROM inbox
+              WHERE dismissed_at IS NOT NULL AND dismissed_at < ?
+              ORDER BY dismissed_at
+              LIMIT ?
+           )`,
+        )
+        .run(olderThan, Math.floor(limit)).changes;
     },
 
     claimDelivery(key, kind, at) {
@@ -1381,6 +1671,17 @@ export function createStore(db: Database): Store {
         )
         .get(threadId) as ThreadLinkRow | undefined;
       return row ?? null;
+    },
+
+    threadLinksByThreadIds(threadIds) {
+      if (threadIds.length === 0) return [];
+      return db
+        .prepare(
+          `SELECT thread_id AS threadId, issue_id AS issueId, team_id AS teamId,
+                  project_id AS projectId, created_at AS createdAt, origin
+             FROM thread_link WHERE thread_id IN (${placeholders(threadIds.length)})`,
+        )
+        .all(...threadIds) as ThreadLinkRow[];
     },
 
     threadLinksForIssues(issueIds) {

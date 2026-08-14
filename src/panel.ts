@@ -130,10 +130,19 @@ export function buildPanelView(deps: PanelDeps, query: PanelQuery): PanelView {
     for (const state of deps.store.workflowStates(teamId)) states.set(state.id, state);
   }
   const members = new Map<string, MemberRow>(
-    deps.store.members().map((member) => [member.id, member]),
+    deps.store
+      .membersByIds(
+        [
+          ...issues
+            .map((issue) => issue.assigneeId)
+            .filter((id): id is string => id !== null),
+          ...query.filters.assigneeIds,
+        ],
+      )
+      .map((member) => [member.id, member]),
   );
   const priorityLabels = new Map<number, string>(
-    deps.store.priorityValues().map((value) => [value.priority, value.label]),
+    deps.store.priorityValues(teamIds).map((value) => [value.priority, value.label]),
   );
 
   const issueIds = issues.map((issue) => issue.id);
@@ -206,7 +215,7 @@ export function buildPanelView(deps: PanelDeps, query: PanelQuery): PanelView {
     },
     total,
     totalWithoutFilters,
-    activeFacets: describeActiveFacets(query, states, members, deps.store),
+    activeFacets: describeActiveFacets(query, states, members, deps.store, teamIds),
     notice: deps.notice,
   });
 }
@@ -233,6 +242,7 @@ function describeActiveFacets(
   states: ReadonlyMap<string, WorkflowStateRow>,
   members: ReadonlyMap<string, MemberRow>,
   store: Store,
+  teamIds: readonly string[],
 ): string[] {
   const facets: string[] = [];
 
@@ -251,7 +261,7 @@ function describeActiveFacets(
   }
 
   if (query.filters.labelIds.length > 0) {
-    const byId = new Map(store.labels([]).map((label) => [label.id, label.name]));
+    const byId = new Map(store.labels(teamIds).map((label) => [label.id, label.name]));
     for (const labelId of query.filters.labelIds) {
       const name = byId.get(labelId);
       if (name !== undefined) facets.push(name);
@@ -259,7 +269,7 @@ function describeActiveFacets(
   }
 
   const priorityNames = new Map(
-    store.priorityValues().map((value) => [value.priority, value.label]),
+    store.priorityValues(teamIds).map((value) => [value.priority, value.label]),
   );
   for (const priority of query.filters.priorities) {
     facets.push(priorityNames.get(priority) ?? `priority ${priority}`);
@@ -333,16 +343,25 @@ export function buildThreadCandidates(
 export function buildRowViews(deps: PanelDeps, issues: readonly IssueRow[]): IssueRowView[] {
   if (issues.length === 0) return [];
 
+  const teamIds = [...new Set(issues.map((issue) => issue.teamId))];
   const states = new Map<string, WorkflowStateRow>();
-  for (const teamId of new Set(issues.map((issue) => issue.teamId))) {
+  for (const teamId of teamIds) {
     for (const state of deps.store.workflowStates(teamId)) states.set(state.id, state);
   }
 
   const context = {
     states,
-    members: new Map(deps.store.members().map((member) => [member.id, member])),
+    members: new Map(
+      deps.store
+        .membersByIds(
+          issues
+            .map((issue) => issue.assigneeId)
+            .filter((id): id is string => id !== null),
+        )
+        .map((member) => [member.id, member]),
+    ),
     priorityLabels: new Map(
-      deps.store.priorityValues().map((value) => [value.priority, value.label]),
+      deps.store.priorityValues(teamIds).map((value) => [value.priority, value.label]),
     ),
     now: deps.now(),
     today: todayAsTimelessDate(deps.now()),
@@ -372,9 +391,17 @@ export function buildWorkingSet(deps: PanelDeps, team: string | null): WorkingSe
   for (const teamId of teamIds) {
     for (const state of deps.store.workflowStates(teamId)) states.set(state.id, state);
   }
-  const members = new Map(deps.store.members().map((member) => [member.id, member]));
+  const members = new Map(
+    deps.store
+      .membersByIds(
+        issues
+          .map((issue) => issue.assigneeId)
+          .filter((id): id is string => id !== null),
+      )
+      .map((member) => [member.id, member]),
+  );
   const priorityLabels = new Map(
-    deps.store.priorityValues().map((value) => [value.priority, value.label]),
+    deps.store.priorityValues(teamIds).map((value) => [value.priority, value.label]),
   );
 
   const links = deps.store.threadLinksForIssues(issueIds);
@@ -496,14 +523,14 @@ export function buildFacets(deps: PanelDeps, team: string | null): Facets {
       name: label.name,
       color: label.color,
     })),
-    members: deps.store.members().map((member) => ({
+    members: deps.store.assignableMembers(teamIds).map((member) => ({
       id: member.id,
       name: member.displayName,
       initials: initials(member.displayName || member.name),
       avatarUrl: member.avatarUrl,
       isMe: member.isMe,
     })),
-    priorities: deps.store.priorityValues().map((value) => ({
+    priorities: deps.store.priorityValues(teamIds).map((value) => ({
       priority: value.priority,
       label: value.label,
     })),

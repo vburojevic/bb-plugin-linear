@@ -53,13 +53,13 @@ describe("buildSpawnRequest", () => {
     expect(Object.keys(request)).not.toContain("parentThreadId");
   });
 
-  it("puts the identifier first in the title so bb's derived slug carries it", () => {
+  it("uses only the identifier in the title so external text never enters host context", () => {
     // Linear's branch autolink matches on the identifier appearing in the
     // branch name, and bb derives that name from the thread title.
-    expect(plan("title").request.title).toBe("ENG-42 Fix the flaky login test");
+    expect(plan("title").request.title).toBe("ENG-42 Linear issue");
   });
 
-  it("truncates a long title so the derived slug stays useful", () => {
+  it("keeps a hostile or long remote title out of the thread title", () => {
     const long = { ...ISSUE, title: "x".repeat(200) };
     const built = buildSpawnRequest({
       issue: long,
@@ -67,8 +67,8 @@ describe("buildSpawnRequest", () => {
       mode: "title",
       preconditions: READY,
     });
-    expect(built.request.title.length).toBeLessThan(100);
-    expect(built.request.title.startsWith("ENG-42 ")).toBe(true);
+    expect(built.request.title).toBe("ENG-42 Linear issue");
+    expect(built.request.title).not.toContain("x");
   });
 
   it("splits the prompt into a human half and an agent-only half", () => {
@@ -77,15 +77,16 @@ describe("buildSpawnRequest", () => {
     expect(agentOnly?.visibility).toBe("agent-only");
 
     // The visible part is a sentence somebody can read three days later.
-    expect(visible?.text).toContain("ENG-42 — Fix the flaky login test");
-    expect(visible?.text).toContain("https://linear.app/acme/issue/ENG-42");
-    // And it does not duplicate the body.
+    expect(visible?.text).toContain("Linear issue ENG-42");
+    expect(visible?.text).toContain("external data");
+    expect(visible?.text).not.toContain("flaky login test");
     expect(visible?.text).not.toContain("one run in six");
 
-    // The agent-only part carries the body, the criteria and the comments.
-    expect(agentOnly?.text).toContain("one run in six");
-    expect(agentOnly?.text).toContain("[ ] Reproduce it");
-    expect(agentOnly?.text).toContain("Kai Rivers: Happens on CI too.");
+    // The agent-only part carries policy, never Linear-controlled prose.
+    expect(agentOnly?.text).toContain("untrusted external data");
+    expect(agentOnly?.text).not.toContain("one run in six");
+    expect(agentOnly?.text).not.toContain("Kai Rivers");
+    expect(agentOnly?.text).toContain("linear_issue_get");
     expect(agentOnly?.text).toContain("call linear_team_context");
   });
 

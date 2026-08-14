@@ -16,6 +16,7 @@ import { createVersionedStore, KV } from "./src/kv.js";
 import { patFromSetting } from "./src/linear/credential.js";
 import {
   configuredSlots,
+  CREDENTIAL_SLOTS,
   duplicateSlots,
   isCredentialSlot,
   slotLabel,
@@ -68,7 +69,7 @@ import {
   writesAllowed,
 } from "./src/write-gate.js";
 import { applyIssueDetail, toIssueInput } from "./src/sync/apply.js";
-import type { IssueNode } from "./src/linear/types.js";
+import type { IssueDetailNode, IssueNode } from "./src/linear/types.js";
 import { resolveBinding, type LadderDeps } from "./src/binding.js";
 import { crossTeamRefusal, scopeFor } from "./src/bindings.js";
 import {
@@ -96,7 +97,7 @@ import {
 import { cadenceFor, runTick } from "./src/sync/service.js";
 import { inboxInterval } from "./src/sync/tiers.js";
 import { classify, deliveryKey, shouldSend } from "./src/notify/classify.js";
-import { RESOURCE_TYPES, verifyWebhook, webhookDeliveryKey } from "./src/webhook.js";
+import { RESOURCE_TYPES, verifyWebhook, webhookDeliveryKey, webhookEnvelope } from "./src/webhook.js";
 import {
   checkWebhookUrl,
   describeDemotion,
@@ -108,11 +109,15 @@ import {
 } from "./src/webhook-register.js";
 import { selectInboxItem, toInboxRow } from "./src/notify/inbox.js";
 import { claimAndSend, deliverToPeer } from "./src/notify/deliver.js";
+import { readAllNotifications } from "./src/notify/pages.js";
 import { budgetPressure, type BudgetSnapshot } from "./src/linear/budget.js";
 import { sleep } from "./src/safe.js";
 import { watermarkSchema } from "./src/sync/watermark.js";
 import { joinSentence, pluralize } from "./src/format.js";
 import { table } from "./src/cli-format.js";
+import { readLimitedBody } from "./src/http-body.js";
+import { safeIssueReference, UNTRUSTED_LINEAR_POLICY } from "./src/security-boundaries.js";
+import { createKeyedSingleFlight, staleWhileRevalidate } from "./src/performance.js";
 
 /**
  * Wiring only.
@@ -153,8 +158,10 @@ const writeRefusalRecordSchema = z.object({
 const installWatermarkSchema = z.object({ v: z.literal(1), at: z.number() });
 const webhookRecordSchema = z.object({ v: z.literal(1), id: z.string(), url: z.string() });
 
-/** Server-local by nature, so the multi-machine rule does not apply. */
-const WEBHOOK_SECRET_KEY = "webhook-signing-secret";
+/** Legacy installs used one secret for every workspace. It is accepted only as
+ * a migration marker and cleared after secure per-team registration. */
+const LEGACY_WEBHOOK_SECRET_KEY = "webhook-signing-secret";
+const webhookSecretKey = (teamId: string): string => `webhook-signing-secret:${teamId}`;
 const sortPreferenceSchema = z.object({ v: z.literal(1), sort: z.string() });
 const backfilledSchema = z.object({ v: z.literal(1), at: z.number(), issues: z.number() });
 
@@ -215,6 +222,12 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     }
 
     const clients = new Map<CredentialSlot, LinearClient>();
+    // A settings change can remove a credential while discovery is already
+    // preparing to forget its workspace. The remote webhook must be deleted
+    // with the previous in-memory credential before the team-to-slot mapping
+    // disappears.
+    let credentialCleanup: Promise<void> = Promise.resolve();
+    const blockedWorkspaceForget = new Set<CredentialSlot>();
 
     function clientForSlot(slot: CredentialSlot): LinearClient {
       const existing = clients.get(slot);
@@ -250,8 +263,9 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     }
 
     /** For everything not scoped to a team: the primary key, which is the one
-     *  virtually every install has and the only one most have. */
-    const client: LinearClient = clientForSlot(PRIMARY_SLOT);
+     *  virtually every install has and the only one most have. Kept as an
+     *  accessor so replacing a key also replaces its breaker and budget. */
+    const primaryClient = (): LinearClient => clientForSlot(PRIMARY_SLOT);
 
     /* ── Realtime ────────────────────────────────────────────────────────── */
     /*
@@ -265,7 +279,9 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     const publishers = new Map<string, { last: number; timer: NodeJS.Timeout | null }>();
     const PUBLISH_FLOOR_MS = 1_000;
 
-    function publish(channel: "linear:data" | "linear:inbox"): void {
+    function publish(
+      channel: "linear:data" | "linear:inbox" | "linear:connection" | "linear:structure",
+    ): void {
       if (lifetime.disposed) return;
       const state = publishers.get(channel) ?? { last: 0, timer: null };
       publishers.set(channel, state);
@@ -291,6 +307,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       }, PUBLISH_FLOOR_MS - since);
     }
 
+    function publishStructure(): void {
+      publish("linear:structure");
+      publish("linear:data");
+    }
+
     /* ── Connection ──────────────────────────────────────────────────────── */
 
     /** One cache entry per slot, keyed on the key's fingerprint so a replaced
@@ -299,6 +320,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       CredentialSlot,
       { fingerprint: string; state: ConnectionState; at: number }
     >();
+    const verifySingleFlight = createKeyedSingleFlight<string, ConnectionState>();
 
     /** Kept as a single name because everything downstream of a *failed*
      *  verification wants to invalidate everything, not one slot. */
@@ -324,65 +346,130 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         return previous.state;
       }
 
-      const verifiedKey = KV.verified(entry.fingerprint);
-      const slotClient = clientForSlot(entry.slot);
-      try {
-        const result = await slotClient.verify({ initiator: "user" });
-        await kv.write(verifiedKey, {
-          v: 1,
-          at: now(),
-          workspaceId: result.viewer.organization.id,
-        });
-        // The install watermark is set on the *first* successful connect and
-        // never again. Notifications older than it are suppressed, which is
-        // what stops a stranger's first run delivering three hundred pings
-        // about last quarter.
-        const existing = await kv.readOptional(KV.installWatermark, installWatermarkSchema);
-        if (existing === undefined) {
-          await kv.write(KV.installWatermark, { v: 1, at: now() });
-        }
+      return verifySingleFlight(`${entry.slot}:${entry.fingerprint}`, async () => {
+        const verifiedKey = KV.verified(entry.fingerprint);
+        const slotClient = clientForSlot(entry.slot);
+        let state: ConnectionState;
+        try {
+          const result = await slotClient.verify({ initiator: "user" });
+          await kv.write(verifiedKey, {
+            v: 1,
+            at: now(),
+            workspaceId: result.viewer.organization.id,
+          });
+          // The install watermark is set on the *first* successful connect and
+          // never again. Notifications older than it are suppressed, which is
+          // what stops a stranger's first run delivering three hundred pings
+          // about last quarter.
+          const existing = await kv.readOptional(KV.installWatermark, installWatermarkSchema);
+          if (existing === undefined) {
+            await kv.write(KV.installWatermark, { v: 1, at: now() });
+          }
 
-        const state = connectedState({
-          result,
-          budget: slotClient.budget(),
-          writeRefusal: await readWriteRefusal(),
-          checkedAt: now(),
-        });
+          state = connectedState({
+            result,
+            budget: slotClient.budget(),
+            writeRefusal: await readWriteRefusal(),
+            checkedAt: now(),
+          });
+        } catch (error) {
+          const seen = await kv.readOptional(verifiedKey, verifiedRecordSchema);
+          state = classifyVerificationFailure({
+            error,
+            hasVerifiedBefore: seen !== undefined,
+          });
+        }
         cachedStates.set(entry.slot, { fingerprint: entry.fingerprint, state, at: now() });
         cached = { at: now() };
+        publish("linear:connection");
         return state;
-      } catch (error) {
-        const seen = await kv.readOptional(verifiedKey, verifiedRecordSchema);
-        const state = classifyVerificationFailure({
-          error,
-          hasVerifiedBefore: seen !== undefined,
-        });
-        cachedStates.set(entry.slot, { fingerprint: entry.fingerprint, state, at: now() });
-        cached = { at: now() };
-        return state;
+      });
+    }
+
+    async function slotSnapshot(entry: SlotCredential): Promise<{
+      value: { slot: CredentialSlot; label: string; state: ConnectionState };
+      fresh: boolean;
+    }> {
+      const previous = cachedStates.get(entry.slot);
+      if (previous !== undefined && previous.fingerprint === entry.fingerprint) {
+        return {
+          value: { slot: entry.slot, label: slotLabel(entry.slot), state: previous.state },
+          fresh: now() - previous.at < CONNECTION_CACHE_MS,
+        };
       }
+
+      const seen = await kv.readOptional(KV.verified(entry.fingerprint), verifiedRecordSchema);
+      const workspace =
+        seen === undefined
+          ? undefined
+          : store.workspaces().find((candidate) => candidate.id === seen.workspaceId);
+      if (seen === undefined || workspace === undefined) {
+        return {
+          value: {
+            slot: entry.slot,
+            label: slotLabel(entry.slot),
+            state: { kind: "checking" },
+          },
+          fresh: false,
+        };
+      }
+
+      const state: ConnectionState = {
+        kind: "connected",
+        viewer: {
+          id: workspace.viewerId,
+          name: workspace.viewerName,
+          displayName: workspace.viewerName,
+          avatarUrl: null,
+        },
+        workspace: {
+          id: workspace.id,
+          name: workspace.name,
+          urlKey: workspace.urlKey,
+        },
+        budget: null,
+        writeRefusal: await readWriteRefusal(),
+        checkedAt: seen.at,
+      };
+      cachedStates.set(entry.slot, {
+        fingerprint: entry.fingerprint,
+        state,
+        at: seen.at,
+      });
+      return {
+        value: { slot: entry.slot, label: slotLabel(entry.slot), state },
+        fresh: now() - seen.at < CONNECTION_CACHE_MS,
+      };
     }
 
     /**
      * Every configured slot, verified.
      *
-     * Sequential rather than parallel: the transport is single-flight per
-     * client, but the *user* is waiting, and four keys verified at once is four
-     * simultaneous round trips for a settings page that renders one line each.
+     * Ordinary reads return the last local snapshot and refresh stale slots in
+     * the background. An explicit recheck waits, but independent workspace
+     * keys verify in parallel and concurrent callers join the same attempt.
      */
     async function slotStates(
       recheck: boolean,
     ): Promise<{ slot: CredentialSlot; label: string; state: ConnectionState }[]> {
       const slots = await activeSlots();
-      const states: { slot: CredentialSlot; label: string; state: ConnectionState }[] = [];
-      for (const entry of slots) {
-        states.push({
-          slot: entry.slot,
-          label: slotLabel(entry.slot),
-          state: await verifySlot(entry, recheck),
-        });
+      if (recheck) {
+        return Promise.all(
+          slots.map(async (entry) => ({
+            slot: entry.slot,
+            label: slotLabel(entry.slot),
+            state: await verifySlot(entry, true),
+          })),
+        );
       }
-      return states;
+      return staleWhileRevalidate({
+        entries: slots,
+        snapshot: slotSnapshot,
+        refresh: async (entry) => {
+          await verifySlot(entry, true);
+        },
+        detach: (task) => lifetime.detach("connection-refresh", task),
+      });
     }
 
     /**
@@ -447,10 +534,16 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      */
     function teamsBySlot(teamIds: readonly string[]): Map<CredentialSlot, string[]> {
       const grouped = new Map<CredentialSlot, string[]>();
+      const teams = new Map(store.teams().map((team) => [team.id, team]));
+      const workspaceSlots = new Map(
+        store.workspaces().map((workspace) => [workspace.id, workspace.slot]),
+      );
       for (const teamId of teamIds) {
-        const workspace = store.workspaceForTeam(teamId);
+        const workspaceSlot = workspaceSlots.get(teams.get(teamId)?.workspaceId ?? "");
         const slot =
-          workspace !== null && isCredentialSlot(workspace.slot) ? workspace.slot : PRIMARY_SLOT;
+          workspaceSlot !== undefined && isCredentialSlot(workspaceSlot)
+            ? workspaceSlot
+            : PRIMARY_SLOT;
         const list = grouped.get(slot) ?? [];
         list.push(teamId);
         grouped.set(slot, list);
@@ -466,25 +559,25 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     function discoverOnce(): Promise<void> {
       discovering ??= (async () => {
         try {
-          // One walk per configured key, because each reaches a different
-          // workspace. Sequentially, so four keys do not become four
-          // concurrent multi-page walks against four separate budgets the
-          // moment someone opens the settings page.
-          for (const entry of await activeSlots()) {
-            if (lifetime.signal.aborted) break;
-            try {
-              await discoverWorkspace(backfillDepsFor(entry.slot));
-            } catch (error) {
-              // One workspace failing must not hide the others. A revoked
-              // second key is a line in the settings section, not an outage.
-              lifetime.log(
-                "warn",
-                `Could not read the ${slotLabel(entry.slot)}'s workspace: ${describeError(error)}`,
-              );
-            }
-          }
+          // Each key has its own workspace, transport lane and request budget,
+          // so making one wait behind another only multiplies wall time.
+          await Promise.all(
+            (await activeSlots()).map(async (entry) => {
+              if (lifetime.signal.aborted) return;
+              try {
+                await discoverWorkspace(backfillDepsFor(entry.slot));
+              } catch (error) {
+                // One workspace failing must not hide the others. A revoked
+                // second key is a line in the settings section, not an outage.
+                lifetime.log(
+                  "warn",
+                  `Could not read the ${slotLabel(entry.slot)}'s workspace: ${describeError(error)}`,
+                );
+              }
+            }),
+          );
           await forgetRemovedWorkspaces();
-          publish("linear:data");
+          publishStructure();
         } finally {
           discovering = null;
         }
@@ -501,6 +594,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * back a minute later should not cost a full re-read.
      */
     async function forgetRemovedWorkspaces(): Promise<void> {
+      await credentialCleanup;
       const slots = await activeSlots();
       // A workspace is forgotten only on positive evidence that OTHER keys are
       // still configured. If a settings read comes back with nothing at all,
@@ -514,6 +608,16 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       const live = new Set(slots.map((entry) => entry.slot));
       for (const workspace of store.workspaces()) {
         if (live.has(workspace.slot as CredentialSlot)) continue;
+        if (
+          isCredentialSlot(workspace.slot) &&
+          blockedWorkspaceForget.has(workspace.slot)
+        ) {
+          lifetime.log(
+            "warn",
+            `Keeping ${workspace.name}'s local removal record until its remote webhook can be deleted.`,
+          );
+          continue;
+        }
         lifetime.log("info", `Forgetting ${workspace.name}: its API key is no longer set.`);
         const forgotten = store.forgetWorkspace(workspace.id);
         // The teams are gone, so their "already backfilled" markers must go
@@ -537,25 +641,36 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       const teamIds = expandTeams(bound, store.teams(), values.includeSubTeams);
       if (teamIds.length === 0) return { issues: 0 };
 
-      const pending: string[] = [];
-      for (const teamId of teamIds) {
-        const done = await kv.readOptional(KV.backfilled(teamId), backfilledSchema);
-        if (force || done === undefined) pending.push(teamId);
-      }
+      const pending = force
+        ? teamIds
+        : (
+            await Promise.all(
+              teamIds.map(async (teamId) => ({
+                teamId,
+                done: await kv.readOptional(KV.backfilled(teamId), backfilledSchema),
+              })),
+            )
+          )
+            .filter((entry) => entry.done === undefined)
+            .map((entry) => entry.teamId);
       if (pending.length === 0) return { issues: 0 };
 
       // One backfill per workspace. Teams from different workspaces cannot
-      // share a request: `teamIds` goes into a filter that only one key can
-      // resolve.
-      let issues = 0;
-      for (const [slot, group] of teamsBySlot(pending)) {
-        const report = await backfillTeams(backfillDepsFor(slot), group);
-        issues += report.issues;
-        for (const teamId of group) {
-          await kv.write(KV.backfilled(teamId), { v: 1, at: now(), issues: report.issues });
-        }
-      }
-      publish("linear:data");
+      // share a request, but their independent transports can make progress
+      // together instead of multiplying the first-sync wall time.
+      const reports = await Promise.all(
+        [...teamsBySlot(pending)].map(async ([slot, group]) => {
+          const report = await backfillTeams(backfillDepsFor(slot), group);
+          await Promise.all(
+            group.map((teamId) =>
+              kv.write(KV.backfilled(teamId), { v: 1, at: now(), issues: report.issues }),
+            ),
+          );
+          return report;
+        }),
+      );
+      const issues = reports.reduce((sum, report) => sum + report.issues, 0);
+      publishStructure();
       return { issues };
     }
 
@@ -587,12 +702,15 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     }
 
     async function backfilledTeamIds(): Promise<Set<string>> {
-      const done = new Set<string>();
-      for (const teamId of store.boundTeamIds()) {
-        const record = await kv.readOptional(KV.backfilled(teamId), backfilledSchema);
-        if (record !== undefined) done.add(teamId);
-      }
-      return done;
+      const records = await Promise.all(
+        store.boundTeamIds().map(async (teamId) => ({
+          teamId,
+          record: await kv.readOptional(KV.backfilled(teamId), backfilledSchema),
+        })),
+      );
+      return new Set(
+        records.filter((entry) => entry.record !== undefined).map((entry) => entry.teamId),
+      );
     }
 
     /* ── What bb knows that Linear cannot ────────────────────────────────── */
@@ -680,26 +798,35 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
 
     /* ── Panel plumbing ──────────────────────────────────────────────────── */
 
-    async function panelDeps(): Promise<PanelDeps> {
+    async function panelDeps(includeBbFacts = false): Promise<PanelDeps> {
       const values = await settings.get();
       const hasCredential = values.apiKey !== undefined && values.apiKey.trim() !== "";
+      const boundTeamIds = expandTeams(
+        store.boundTeamIds(),
+        store.teams(),
+        values.includeSubTeams,
+      );
       return {
         store,
         now,
         hasCredential,
-        boundTeamIds: expandTeams(store.boundTeamIds(), store.teams(), values.includeSubTeams),
+        boundTeamIds,
         backfilledTeamIds: await backfilledTeamIds(),
         notice: panelNotice(),
-        bbFacts: bbFactsFor(
-          store
-            .queryIssues({
-              teamIds: expandTeams(store.boundTeamIds(), store.teams(), values.includeSubTeams),
-              includeCompleted: true,
-              sort: "updated",
-              limit: 500,
-            })
-            .map((issue) => issue.id),
-        ),
+        ...(includeBbFacts
+          ? {
+              bbFacts: bbFactsFor(
+                store
+                  .queryIssues({
+                    teamIds: boundTeamIds,
+                    includeCompleted: true,
+                    sort: "updated",
+                    limit: 500,
+                  })
+                  .map((issue) => issue.id),
+              ),
+            }
+          : {}),
       };
     }
 
@@ -844,9 +971,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         const state = await connectionState(false);
         checks.push({
           label: "Linear",
-          status: state.kind === "connected" ? "ok" : "fail",
+          status: state.kind === "connected" ? "ok" : state.kind === "checking" ? "warn" : "fail",
           detail: describeConnection(state),
-          ...(state.kind === "connected" || state.kind === "no-credential"
+          ...(state.kind === "connected" ||
+          state.kind === "no-credential" ||
+          state.kind === "checking"
             ? {}
             : { fix: state.message }),
         });
@@ -867,6 +996,8 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
               detail:
                 entry.state.kind === "no-credential"
                   ? "set but empty"
+                  : entry.state.kind === "checking"
+                    ? "checking the connection"
                   : entry.state.message,
               fix: `Save a working key for that workspace, or clear the ${entry.label} field — its teams are not being read.`,
             });
@@ -969,6 +1100,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * longer reaches this bb.
      */
     const selfTestArrivals = new Set<string>();
+    const pendingSelfTests = new Map<string, string>();
 
     /** When a signed delivery last actually arrived. A Linear-side failure
      *  older than this is history rather than a symptom. */
@@ -983,7 +1115,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     const mutations: MutationDeps = {
       clientFor: (issueId) => {
         const issue = store.issue(issueId);
-        return issue === null ? client : clientForTeam(issue.teamId);
+        return issue === null ? primaryClient() : clientForTeam(issue.teamId);
       },
       store,
       now,
@@ -1012,49 +1144,62 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * mention of something outside the backfill window, an agent naming an
      * identifier. Never a sweep: one click must not become a hundred requests.
      */
-    async function refreshIssue(idOrIdentifier: string, signal?: AbortSignal) {
-      // An identifier does not say which workspace it belongs to, and with
-      // several keys configured only one of them can resolve it. Tried in slot
-      // order, stopping at the first that answers — which for the one-key
-      // install every user has is exactly one request.
-      const slots = await activeSlots();
-      const candidates = slots.length === 0 ? [PRIMARY_SLOT] : slots.map((entry) => entry.slot);
-      for (const slot of candidates) {
-        try {
-          const result = await clientForSlot(slot).issueDetail(idOrIdentifier, {
-            initiator: "user",
-            ...(signal ? { signal } : {}),
-          });
-          applyIssueDetail(store, result.issue, now());
-          publish("linear:data");
-          return store.issue(result.issue.id);
-        } catch (error) {
-          // `Query.issue` is non-nullable, so "no such issue" arrives as a
-          // GraphQL error rather than a null. Distinguishing that from a real
-          // failure is what lets the caller say "no issue called ENG-999"
-          // instead of "something went wrong" — and here it is also what says
-          // "not in this workspace, try the next key".
-          if (isLinearError(error) && error.code === "query") continue;
-          throw error;
-        }
+    async function refreshIssue(
+      idOrIdentifier: string,
+      readTeamIds: readonly string[],
+      signal?: AbortSignal,
+    ) {
+      // Resolve only through credentials represented by the caller's read
+      // scope, and check the returned team before anything reaches the mirror.
+      const permitted = new Set(readTeamIds);
+      const results = await Promise.all(
+        [...teamsBySlot(readTeamIds)].map(async ([slot]): Promise<IssueDetailNode | null> => {
+          try {
+            const result = await clientForSlot(slot).issueDetail(idOrIdentifier, {
+              initiator: "user",
+              ...(signal ? { signal } : {}),
+            });
+            return permitted.has(result.issue.team.id) ? result.issue : null;
+          } catch (error) {
+            // `Query.issue` is non-nullable, so "no such issue" arrives as a
+            // GraphQL error rather than a null. Distinguishing that from a real
+            // failure is also what says "not in this workspace".
+            if (isLinearError(error) && error.code === "query") return null;
+            throw error;
+          }
+        }),
+      );
+      const matches = new Map<string, IssueDetailNode>();
+      for (const issue of results) {
+        if (issue !== null) matches.set(issue.id, issue);
       }
 
-      return null;
+      if (matches.size > 1) {
+        throw new Error(
+          `${idOrIdentifier} exists in more than one connected workspace. Use the issue id or URL.`,
+        );
+      }
+      const match = matches.values().next().value ?? null;
+      if (match === null) return null;
+      applyIssueDetail(store, match, now());
+      publish("linear:data");
+      return store.issue(match.id);
     }
 
     async function detailFor(id: string): Promise<DetailResult> {
       let issue = store.issue(id) ?? store.issueByIdentifier(id);
+      const readable = store.boundTeamIds();
       if (issue === null) {
-        issue = await lifetime.runAsync("issue", () => refreshIssue(id), null);
+        issue = await lifetime.runAsync("issue", () => refreshIssue(id, readable), null);
       }
       if (issue === null) return { kind: "missing", identifier: id };
 
       // The one place in the UI where a stranger meets the scoping rule, and
       // where the rule teaches itself: both teams named, and a way out.
-      const readable = new Set(store.boundTeamIds());
-      if (!readable.has(issue.teamId)) {
+      const readableSet = new Set(readable);
+      if (!readableSet.has(issue.teamId)) {
         const team = store.team(issue.teamId);
-        const allowed = [...readable]
+        const allowed = [...readableSet]
           .map((teamId) => store.team(teamId))
           .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
         return {
@@ -1069,15 +1214,14 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       }
 
       const team = store.team(issue.teamId);
-      const children = store
-        .queryIssues({
-          teamIds: [issue.teamId],
-          includeCompleted: true,
-          sort: "manual",
-          limit: 100,
-        })
-        .filter((child) => child.parentId === issue.id);
+      const children = store.childIssues(issue.id, 100);
       const states = store.workflowStates(issue.teamId);
+      const comments = store.comments(issue.id);
+      const memberIds = [
+        issue.assigneeId,
+        issue.creatorId,
+        ...comments.map((comment) => comment.userId),
+      ].filter((id): id is string => id !== null);
 
       return {
         kind: "issue",
@@ -1085,12 +1229,14 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           issue,
           team,
           states,
-          members: new Map(store.members().map((member) => [member.id, member])),
+          members: new Map(
+            store.membersByIds(memberIds).map((member) => [member.id, member]),
+          ),
           labels: new Map(store.labels([issue.teamId]).map((label) => [label.id, label])),
           priorityLabels: new Map(
-            store.priorityValues().map((value) => [value.priority, value.label]),
+            store.priorityValues([issue.teamId]).map((value) => [value.priority, value.label]),
           ),
-          comments: store.comments(issue.id),
+          comments,
           commentsTruncated: false,
           subIssues: children.map((child) => ({
             id: child.id,
@@ -1174,7 +1320,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     }
 
     function worstBreaker(): ReturnType<LinearClient["breaker"]> {
-      let worst = client.breaker();
+      let worst = primaryClient().breaker();
       for (const [, entry] of clients) {
         const view = entry.breaker();
         if (view.open && !worst.open) worst = view;
@@ -1210,9 +1356,8 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           }
 
           const teamIds = expandTeams(store.boundTeamIds(), store.teams(), values.includeSubTeams);
-          const runningLinked = [...activeThreads].some(
-            (threadId) => store.threadLink(threadId) !== null,
-          );
+          const runningLinked =
+            store.threadLinksByThreadIds([...activeThreads]).length > 0;
 
           const cadence = cadenceFor(
             {
@@ -1237,60 +1382,70 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             // issued it — and they cannot share a watermark either, because
             // one workspace's newer timestamps would skip straight past the
             // other's older changes.
-            let anyChanged = false;
-            let anyApplied = false;
+            const outcomes = await Promise.all(
+              [...teamsBySlot(teamIds)].map(async ([slot, group]) => {
+                if (signal.aborted) return null;
+                const scope = watermarkScope(slot);
+                const [issuesWatermark, commentsWatermark] = await Promise.all([
+                  readWatermark(KV.watermark(scope, "issues")),
+                  readWatermark(KV.watermark(scope, "comments")),
+                ]);
 
-            for (const [slot, group] of teamsBySlot(teamIds)) {
-              if (signal.aborted) break;
-              const scope = watermarkScope(slot);
-              const issuesWatermark = await readWatermark(KV.watermark(scope, "issues"));
-              const commentsWatermark = await readWatermark(KV.watermark(scope, "comments"));
-
-              // A watermark of zero means nothing has ever been read, and the
-              // bounded backfill — not a query for everything since 1970 — is
-              // what fills that gap.
-              if (issuesWatermark === 0) {
-                await lifetime.runAsync("backfill", async () => {
-                  await backfillOnce(false);
-                });
-                await kv.write(KV.watermark(scope, "issues"), { v: 1, at: now() - 60_000 });
-                await kv.write(KV.watermark(scope, "comments"), { v: 1, at: now() - 60_000 });
-                continue;
-              }
-
-              const outcome = await lifetime.runAsync(
-                "tick",
-                () =>
-                  runTick(
-                    {
-                      client: clientForSlot(slot),
-                      store,
-                      now,
-                      log: (level, message) => lifetime.log(level, message),
-                      signal,
-                    },
-                    { teamIds: group, issuesWatermark, commentsWatermark, tickNumber },
-                  ),
-                null,
-              );
-
-              if (outcome !== null && outcome.applied) {
-                anyApplied = true;
-                if (outcome.issuesWatermark !== null) {
-                  await kv.write(KV.watermark(scope, "issues"), {
-                    v: 1,
-                    at: outcome.issuesWatermark,
+                // A watermark of zero means nothing has ever been read, and the
+                // bounded backfill — not a query for everything since 1970 — is
+                // what fills that gap.
+                if (issuesWatermark === 0) {
+                  await lifetime.runAsync("backfill", async () => {
+                    await backfillOnce(false);
                   });
+                  const at = now() - 60_000;
+                  await Promise.all([
+                    kv.write(KV.watermark(scope, "issues"), { v: 1, at }),
+                    kv.write(KV.watermark(scope, "comments"), { v: 1, at }),
+                  ]);
+                  return null;
+                }
+
+                const outcome = await lifetime.runAsync(
+                  "tick",
+                  () =>
+                    runTick(
+                      {
+                        client: clientForSlot(slot),
+                        store,
+                        now,
+                        log: (level, message) => lifetime.log(level, message),
+                        signal,
+                      },
+                      { teamIds: group, issuesWatermark, commentsWatermark, tickNumber },
+                    ),
+                  null,
+                );
+                if (outcome === null || !outcome.applied) return outcome;
+
+                const writes: Promise<void>[] = [];
+                if (outcome.issuesWatermark !== null) {
+                  writes.push(
+                    kv.write(KV.watermark(scope, "issues"), {
+                      v: 1,
+                      at: outcome.issuesWatermark,
+                    }),
+                  );
                 }
                 if (outcome.commentsWatermark !== null) {
-                  await kv.write(KV.watermark(scope, "comments"), {
-                    v: 1,
-                    at: outcome.commentsWatermark,
-                  });
+                  writes.push(
+                    kv.write(KV.watermark(scope, "comments"), {
+                      v: 1,
+                      at: outcome.commentsWatermark,
+                    }),
+                  );
                 }
-                if (outcome.changed) anyChanged = true;
-              }
-            }
+                await Promise.all(writes);
+                return outcome;
+              }),
+            );
+            const anyApplied = outcomes.some((outcome) => outcome?.applied === true);
+            const anyChanged = outcomes.some((outcome) => outcome?.changed === true);
 
             tickNumber += 1;
             lastTickAt = now();
@@ -1354,8 +1509,15 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         // Claims older than thirty days cannot affect anything: the
         // notifications they guard are long past the watermark.
         const claims = store.pruneDeliveries(now() - 30 * 86_400_000);
-        if (dropped + claims > 0) {
-          lifetime.log("debug", `Pruned ${dropped} echo rows and ${claims} delivery claims.`);
+        // Dismissed inbox rows have no remaining user-visible purpose. Bound
+        // each pass so a long-lived install never turns maintenance into one
+        // large write transaction.
+        const inbox = store.pruneInbox(now() - 30 * 86_400_000, 1_000);
+        if (dropped + claims + inbox > 0) {
+          lifetime.log(
+            "debug",
+            `Pruned ${dropped} echo rows, ${claims} delivery claims and ${inbox} dismissed inbox rows.`,
+          );
         }
       });
     });
@@ -1379,30 +1541,43 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // it were optional; it is not.
       "/webhook",
       async (context) => {
-        // A cheap upper bound before buffering the body of an UNAUTHENTICATED
-        // route into memory. Linear's deliveries are a few KB; a declared
-        // Content-Length past 1 MB is not a real delivery, so it is refused
-        // without reading. (The stream itself could still lie about its
-        // length, so this is a first line, not the whole defence — the host's
-        // own body limit is the backstop.)
-        const declaredLength = Number(context.req.header("content-length") ?? "0");
-        if (Number.isFinite(declaredLength) && declaredLength > 1_048_576) {
-          return new Response("too large", { status: 413 });
+        // The RAW body, byte-limited while streaming. An unauthenticated route
+        // must not trust Content-Length or buffer first and measure later.
+        const limited = await readLimitedBody(context.req.raw);
+        if (!limited.ok) {
+          return new Response(limited.reason === "too-large" ? "too large" : "bad body", {
+            status: limited.reason === "too-large" ? 413 : 400,
+          });
         }
-        // The RAW body text. Never parse-then-restringify — the signature is
-        // over the bytes Linear sent, and a round trip reorders keys.
-        const raw = await context.req.text();
-        if (raw.length > 1_048_576) {
-          return new Response("too large", { status: 413 });
+        const raw = limited.text;
+        const envelope = webhookEnvelope(raw);
+        if (envelope === null) return new Response("no", { status: 401 });
+
+        let secret: string | null = null;
+        let organizationId: string | null = null;
+        let knownWebhookIds = new Set<string>();
+        let boundTeamIds = new Set<string>();
+        if (envelope.type === "SelfTest" && envelope.nonce !== null) {
+          secret = pendingSelfTests.get(envelope.nonce) ?? null;
+        } else if (envelope.webhookId !== null) {
+          const target = [...webhookIds].find((entry) => entry[1] === envelope.webhookId);
+          if (target !== undefined) {
+            const [teamId, webhookId] = target;
+            secret = store.localSecret(webhookSecretKey(teamId));
+            organizationId = store.workspaceForTeam(teamId)?.id ?? null;
+            knownWebhookIds = new Set([webhookId]);
+            boundTeamIds = new Set([teamId]);
+          }
         }
+
         const verified = verifyWebhook({
           raw,
           signature: context.req.header("linear-signature") ?? null,
-          secret: store.localSecret(WEBHOOK_SECRET_KEY),
+          secret,
           now: now(),
-          organizationId: store.workspace()?.id ?? null,
-          knownWebhookIds: new Set(webhookIds.values()),
-          boundTeamIds: new Set(store.boundTeamIds()),
+          organizationId,
+          knownWebhookIds,
+          boundTeamIds,
         });
 
         if (!verified.ok) {
@@ -1459,6 +1634,85 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * user's own endpoint, and only call `webhookCreate` if that probe comes
      * back through the handler above.
      */
+    let webhookDeletion: Promise<void> = Promise.resolve();
+
+    /**
+     * Remove every registered webhook at Linear before dropping the local id
+     * and signing secret. A failed remote deletion deliberately keeps its
+     * local record: otherwise the only handle needed to retry would be gone
+     * while Linear continued sending data to the old endpoint.
+     */
+    async function deleteRegisteredWebhooks(options: {
+      teamIds?: ReadonlySet<string>;
+      clientForTeam?: (teamId: string) => LinearClient;
+    } = {}): Promise<{
+      deleted: number;
+      failures: string[];
+    }> {
+      const run = webhookDeletion.then(async () => {
+        const targets = new Map<string, { key: string; id: string | null }>();
+        for (const key of await kv.keys("webhook:")) {
+          const teamId = key.slice("webhook:".length);
+          if (options.teamIds !== undefined && !options.teamIds.has(teamId)) continue;
+          const record = await kv.readOptional(key, webhookRecordSchema);
+          targets.set(teamId, { key, id: record?.id ?? webhookIds.get(teamId) ?? null });
+        }
+        for (const [teamId, id] of webhookIds) {
+          if (options.teamIds !== undefined && !options.teamIds.has(teamId)) continue;
+          if (!targets.has(teamId)) targets.set(teamId, { key: KV.webhook(teamId), id });
+        }
+
+        let deleted = 0;
+        const failures: string[] = [];
+        for (const [teamId, target] of targets) {
+          if (target.id === null) {
+            failures.push(teamId);
+            continue;
+          }
+          try {
+            const remote = options.clientForTeam ?? clientForTeam;
+            const result = await remote(teamId).deleteWebhook(target.id, {
+              initiator: "user",
+            });
+            if (!result.webhookDelete.success) {
+              throw new Error("Linear did not confirm webhook deletion");
+            }
+          } catch (error) {
+            failures.push(teamId);
+            lifetime.log(
+              "warn",
+              `Could not delete the Linear webhook for ${teamId}: ${describeError(error)}`,
+            );
+            continue;
+          }
+
+          await kv.remove(target.key);
+          webhookIds.delete(teamId);
+          store.putLocalSecret(webhookSecretKey(teamId), "");
+          deleted += 1;
+        }
+
+        if ((await kv.keys("webhook:")).length === 0 && webhookIds.size === 0) {
+          store.putLocalSecret(LEGACY_WEBHOOK_SECRET_KEY, "");
+        }
+        return { deleted, failures };
+      });
+      webhookDeletion = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    }
+
+    function webhookCleanupFailure(failures: readonly string[]): string {
+      return [
+        `Linear did not confirm webhook removal for: ${failures.join(", ")}.`,
+        "The local ids and signing secrets were retained so the removal can be retried.",
+        "Check API access and Allow changes to Linear, then run webhook disable again.",
+        "",
+      ].join("\n");
+    }
+
     async function enableWebhooks(rawUrl: string): Promise<{ ok: boolean; text: string }> {
       // Registering a webhook writes to the workspace's configuration. The
       // transport would refuse the webhookCreate anyway; checking first
@@ -1479,28 +1733,20 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         };
       }
 
-      // Written before the probe is sent, because the handler verifies the
-      // probe's signature against exactly this value. A secret generated after
-      // a successful send would have nothing to verify against.
-      const secret = store.localSecret(WEBHOOK_SECRET_KEY) ?? "";
-      const signing = secret === "" ? newSigningSecret() : secret;
-      store.putLocalSecret(WEBHOOK_SECRET_KEY, signing);
-      // Registered with the redactor so that if Linear ever echoes the
-      // mutation input back in an error (it sends the secret as a GraphQL
-      // variable), the value is scrubbed from that error before it reaches the
-      // CLI output or a log line — the one path the audit found could carry it.
-      rememberSecret(signing);
-
       const nonce = newNonce();
+      const probeSecret = newSigningSecret();
+      pendingSelfTests.set(nonce, probeSecret);
       const selfTest = await runSelfTest({
         url,
-        secret: signing,
+        secret: probeSecret,
         nonce,
         now: now(),
         arrived: (value) => selfTestArrivals.has(value),
         sleep: (ms) => sleep(ms, lifetime.signal),
+      }).finally(() => {
+        pendingSelfTests.delete(nonce);
+        selfTestArrivals.delete(nonce);
       });
-      selfTestArrivals.delete(nonce);
 
       if (!selfTest.ok) {
         return {
@@ -1513,25 +1759,46 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       for (const key of await kv.keys("webhook:")) {
         const record = await kv.readOptional(key, webhookRecordSchema);
         if (record !== undefined) {
-          existing.set(key.slice("webhook:".length), { id: record.id, url: record.url });
+          const teamId = key.slice("webhook:".length);
+          const hasIsolatedSecret = (store.localSecret(webhookSecretKey(teamId)) ?? "") !== "";
+          existing.set(teamId, {
+            id: record.id,
+            // A legacy shared-secret record is deliberately forced through
+            // delete-and-create on the next explicit enable.
+            url: hasIsolatedSecret ? record.url : `legacy:${record.url}`,
+          });
         }
       }
 
       const plan = planRegistration(teamIds, existing, url);
       const created: string[] = [];
       const failed: string[] = [];
+      const deleteFailed = new Set<string>();
 
       for (const entry of plan.deleteIds) {
         try {
-          await clientForTeam(entry.teamId).deleteWebhook(entry.id);
+          const result = await clientForTeam(entry.teamId).deleteWebhook(entry.id);
+          if (!result.webhookDelete.success) {
+            throw new Error("Linear did not confirm webhook deletion");
+          }
         } catch (error) {
-          lifetime.log("debug", `Could not delete webhook ${entry.id}: ${describeError(error)}`);
+          deleteFailed.add(entry.teamId);
+          failed.push(`${entry.teamId}: the previous webhook could not be removed`);
+          lifetime.log("warn", `Could not delete webhook ${entry.id}: ${describeError(error)}`);
+          continue;
         }
+        await kv.remove(KV.webhook(entry.teamId));
+        webhookIds.delete(entry.teamId);
+        store.putLocalSecret(webhookSecretKey(entry.teamId), "");
       }
 
       for (const teamId of plan.create) {
+        if (deleteFailed.has(teamId)) continue;
         const team = store.team(teamId);
         const label = `bb (${team?.key ?? teamId})`;
+        const signing = newSigningSecret();
+        store.putLocalSecret(webhookSecretKey(teamId), signing);
+        rememberSecret(signing);
         try {
           const result = await clientForTeam(teamId).createWebhook({
             url,
@@ -1549,9 +1816,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           webhookIds.set(teamId, webhook.id);
           created.push(team?.key ?? teamId);
         } catch (error) {
+          store.putLocalSecret(webhookSecretKey(teamId), "");
           failed.push(`${team?.key ?? teamId}: ${describeError(error)}`);
         }
       }
+      store.putLocalSecret(LEGACY_WEBHOOK_SECRET_KEY, "");
 
       if (created.length === 0 && failed.length > 0) {
         return {
@@ -1627,6 +1896,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           }
           await kv.remove(`webhook:${teamId}`);
           webhookIds.delete(teamId);
+          store.putLocalSecret(webhookSecretKey(teamId), "");
           cached = null;
           publish("linear:data");
         }
@@ -1648,19 +1918,21 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // Every key has its own inbox, because a Linear notification belongs to
       // a viewer and each key is a different viewer. One workspace's quiet
       // afternoon must not advance another's cursor.
-      let sent = 0;
-      for (const entry of await activeSlots()) {
-        if (lifetime.disposed) break;
-        try {
-          sent += await pollNotificationsFor(entry.slot);
-        } catch (error) {
-          lifetime.log(
-            "debug",
-            `Could not read the ${slotLabel(entry.slot)}'s inbox: ${describeError(error)}`,
-          );
-        }
-      }
-      return sent;
+      const counts = await Promise.all(
+        (await activeSlots()).map(async (entry) => {
+          if (lifetime.disposed) return 0;
+          try {
+            return await pollNotificationsFor(entry.slot);
+          } catch (error) {
+            lifetime.log(
+              "debug",
+              `Could not read the ${slotLabel(entry.slot)}'s inbox: ${describeError(error)}`,
+            );
+            return 0;
+          }
+        }),
+      );
+      return counts.reduce((sum, count) => sum + count, 0);
     }
 
     async function pollNotificationsFor(slot: CredentialSlot): Promise<number> {
@@ -1687,12 +1959,19 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         await kv.write(watermarkKey, { v: 1, at: cursor });
       }
 
-      const result = await clientForSlot(slot).notifications(new Date(cursor).toISOString(), {
-        initiator: "background",
-      });
-      if (result.notifications.nodes.length === 0) return 0;
+      const nodes = await readAllNotifications(
+        clientForSlot(slot),
+        new Date(cursor).toISOString(),
+        { initiator: "background" },
+      );
+      if (nodes.length === 0) return 0;
 
-      const viewer = store.viewer();
+      const workspace = store.workspaces().find((entry) => entry.slot === slot);
+      if (workspace === undefined) {
+        lifetime.log("warn", `Not storing inbox data for ${slot}: its workspace is not known yet.`);
+        return 0;
+      }
+
       const boundTeamIds = new Set(store.boundTeamIds());
       // Does the workspace this slot reaches have any bound team? Used to
       // suppress pushes from a connected-but-unbound workspace's team-less
@@ -1704,19 +1983,14 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // makes — and without it an upgraded install would answer "false" for
       // its own personal workspace and silently stop pushing legitimate
       // team-less mentions.
-      const workspaceHasBoundTeam = [...boundTeamIds].some((teamId) => {
-        const workspace = store.workspaceForTeam(teamId);
-        const owning =
-          workspace !== null && isCredentialSlot(workspace.slot)
-            ? workspace.slot
-            : PRIMARY_SLOT;
-        return owning === slot;
-      });
-      const rows = result.notifications.nodes.map((node) => toInboxRow(node, now()));
+      const slotTeamIds = teamsBySlot([...boundTeamIds]).get(slot) ?? [];
+      const workspaceHasBoundTeam = slotTeamIds.length > 0;
+      const viewer = slotTeamIds.length === 0 ? null : store.viewer(slotTeamIds);
+      const rows = nodes.map((node) => toInboxRow(node, now(), workspace.id));
       store.putInbox(rows);
 
       let sent = 0;
-      for (const node of result.notifications.nodes) {
+      for (const node of nodes) {
         const verdict = shouldSend({
           node,
           now: now(),
@@ -1733,7 +2007,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         });
         if (!verdict.send) continue;
 
-        const key = deliveryKey(node);
+        const key = `${workspace.id}:${deliveryKey(node)}`;
         const kind = classify(node);
         const delivered = await claimAndSend(
           {
@@ -1774,12 +2048,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // Rung 3: the frontend raises the toast on this signal. The backend
       // never toasts.
       publish("linear:inbox");
-      publish("linear:data");
 
-      const newest = result.notifications.nodes
+      const newest = nodes
         .map((node) => Date.parse(node.createdAt))
         .filter((value) => Number.isFinite(value));
-      if (newest.length > 0 && !result.notifications.pageInfo.hasNextPage) {
+      if (newest.length > 0) {
         await kv.write(watermarkKey, { v: 1, at: Math.max(...newest) });
       }
       return sent;
@@ -1834,7 +2107,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         clients: slots.map((entry) => clientForSlot(entry.slot)),
         clientForIssue: (issueId) => {
           const issue = store.issue(issueId);
-          return issue === null ? client : clientForTeam(issue.teamId);
+          return issue === null ? primaryClient() : clientForTeam(issue.teamId);
         },
         store,
         mutations,
@@ -1951,8 +2224,10 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       bb,
       clientForIssue: (issueId) => {
         const issue = store.issue(issueId);
-        return issue === null ? client : clientForTeam(issue.teamId);
+        return issue === null ? primaryClient() : clientForTeam(issue.teamId);
       },
+      refreshIssue: (idOrIdentifier, readTeamIds) =>
+        refreshIssue(idOrIdentifier, readTeamIds),
       store,
       mutations,
       bindings: () => bindingSnapshot,
@@ -2098,26 +2373,50 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         instructionCache.delete(threadId);
         return;
       }
-      const state = store
-        .workflowStates(issue.teamId)
-        .find((entry) => entry.id === issue.stateId);
+      setInstruction(threadId, link, issue);
+    }
+
+    function setInstruction(
+      threadId: string,
+      link: NonNullable<ReturnType<Store["threadLink"]>>,
+      issue: IssueRow,
+    ): void {
+      const reference = safeIssueReference(issue.identifier, issue.id);
       instructionCache.set(
         threadId,
         [
-          `This thread is working on Linear issue ${issue.identifier} — "${issue.title}"`,
-          `(state: ${state?.name ?? "unknown"}; bound via ${link.origin}).`,
-          `Read it with \`bb linear issue ${issue.identifier} --comments\`;`,
-          `comment with \`bb linear comment ${issue.identifier} -- <text>\`;`,
-          `move it with \`bb linear move ${issue.identifier} <state-name-or-type>\`.`,
+          `This thread is linked to Linear issue ${reference} (bound via ${link.origin}).`,
+          UNTRUSTED_LINEAR_POLICY,
+          `Read it with \`bb linear issue ${reference} --comments\`;`,
+          `comment with \`bb linear comment ${reference} -- <text>\`;`,
+          `move it with \`bb linear move ${reference} <state-name-or-type>\`.`,
         ].join(" "),
       );
     }
 
     /** Re-derive every cached sentence from the mirror. Called from the
      *  throttled publish path, so a state change reaches the next turn's
-     *  context without a per-turn database read. */
+     *  context without a per-turn database read. Both tables are hydrated in
+     *  bounded batches: two queries total, not two per cached thread. */
     function rebuildAllInstructions(): void {
-      for (const threadId of [...instructionCache.keys()]) rebuildInstruction(threadId);
+      const threadIds = [...instructionCache.keys()];
+      const links = new Map(
+        store.threadLinksByThreadIds(threadIds).map((link) => [link.threadId, link]),
+      );
+      const issues = new Map(
+        store
+          .issuesByIds([...links.values()].map((link) => link.issueId))
+          .map((issue) => [issue.id, issue]),
+      );
+      for (const threadId of threadIds) {
+        const link = links.get(threadId);
+        const issue = link === undefined ? undefined : issues.get(link.issueId);
+        if (link === undefined || issue === undefined) {
+          instructionCache.delete(threadId);
+        } else {
+          setInstruction(threadId, link, issue);
+        }
+      }
     }
 
     bb.agents.contributeInstructions(({ threadId }) =>
@@ -2144,9 +2443,22 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         publish("linear:data");
         return { ok: true, message: "Unlinked." };
       }
-      const issue = store.issue(issueId) ?? store.issueByIdentifier(issueId);
+      if (projectId === null) {
+        return { ok: false, message: "This thread has no project, so no Linear scope can be established." };
+      }
+      const current = scopeFor(projectId, bindingSnapshot);
+      const exact = store.issue(issueId);
+      const matches = exact === null ? store.issuesByIdentifier(issueId) : [exact];
+      const inScope = matches.filter((entry) => current.readTeamIds.includes(entry.teamId));
+      if (inScope.length > 1) {
+        return {
+          ok: false,
+          message: `${issueId} is ambiguous in this project's Linear scope. Use the issue id or URL.`,
+        };
+      }
+      const issue = inScope[0] ?? null;
       if (issue === null) {
-        return { ok: false, message: `No issue called ${issueId} in the local copy.` };
+        return { ok: false, message: `No issue called ${issueId} is readable by this project.` };
       }
       declined.get(threadId)?.delete(issue.id);
       store.linkThread({
@@ -2200,6 +2512,48 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         };
       }
       return { issue };
+    }
+
+    function projectInboxRows(rows: ReturnType<Store["inbox"]>) {
+      const members = new Map(
+        store
+          .membersByIds(
+            rows
+              .map((row) => row.actorId)
+              .filter((id): id is string => id !== null),
+          )
+          .map((member) => [member.id, member]),
+      );
+      const issues = new Map(
+        store
+          .issuesByIds(
+            rows
+              .map((row) => row.issueId)
+              .filter((id): id is string => id !== null),
+          )
+          .map((issue) => [issue.id, issue]),
+      );
+      const workspaces = store.workspaces();
+      const workspaceNames =
+        workspaces.length < 2
+          ? new Map<string, string>()
+          : new Map(workspaces.map((workspace) => [workspace.id, workspace.name]));
+
+      return rows.map((row) => {
+        const issue = row.issueId === null ? null : (issues.get(row.issueId) ?? null);
+        return selectInboxItem({
+          row: {
+            ...row,
+            kind: row.kind as ReturnType<typeof classify>,
+          },
+          actor: row.actorId === null ? null : (members.get(row.actorId) ?? null),
+          issue:
+            issue === null ? null : { identifier: issue.identifier, title: issue.title },
+          blockers: [],
+          now: now(),
+          workspace: workspaceNames.get(row.workspaceId) ?? null,
+        });
+      });
     }
 
     bb.rpc.register(serverRpcContract, {
@@ -2351,11 +2705,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
            * for the case where membership has never been read.
            */
           members: (() => {
-            const onTeam = new Set(store.teamMemberIds(issue.teamId));
-            const everyone = store.members().filter((entry) => entry.active && !entry.isApp);
-            return onTeam.size === 0
-              ? everyone
-              : everyone.filter((entry) => onTeam.has(entry.id));
+            return store.assignableMembers([issue.teamId]);
           })().map((entry) => ({
             id: entry.id,
             name: entry.displayName,
@@ -2369,7 +2719,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             .filter((entry) => !entry.isGroup)
             .map((entry) => ({ id: entry.id, name: entry.name, color: entry.color })),
 
-          priorities: store.priorityValues().map((entry) => ({
+          priorities: store.priorityValues([issue.teamId]).map((entry) => ({
             priority: entry.priority,
             label: entry.label,
           })),
@@ -2450,7 +2800,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         // in step, and true by construction.
         lastPanelReadAt = now();
         lastFrontendReadAt = now();
-        const deps = await panelDeps();
+        const deps = await panelDeps(true);
         // Mounting the panel is what starts the first read. Doing it here
         // rather than in the factory keeps the load path offline-safe: a
         // flaky connection during an upgrade must not fail activation.
@@ -2480,7 +2830,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       async workingSet({ team }) {
         lastPanelReadAt = now();
         lastFrontendReadAt = now();
-        const deps = await panelDeps();
+        const deps = await panelDeps(true);
         if (deps.boundTeamIds.length > 0) {
           lifetime.detach("backfill", async () => {
             await backfillOnce(false);
@@ -2512,7 +2862,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         }
         store.setBinding(projectId, teamId, role, now());
         refreshBindings();
-        publish("linear:data");
+        publishStructure();
         lifetime.detach("backfill", async () => {
           await backfillOnce(false);
         });
@@ -2525,7 +2875,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       async unbind({ projectId, teamId }) {
         store.removeBinding(projectId, teamId);
         refreshBindings();
-        publish("linear:data");
+        publishStructure();
         // The issues stay until the nightly prune, which is deliberate: a
         // mis-click that dropped a binding should not also cost the local copy
         // and a fresh backfill to undo.
@@ -2605,38 +2955,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       async inbox({ markSeen }) {
         lastFrontendReadAt = now();
         const rows = store.inbox({ limit: 200 });
-        const members = new Map(store.members().map((member) => [member.id, member]));
-        // Workspace labels only when there is more than one to tell apart.
-        const workspaces = store.workspaces();
-        const workspaceNameFor =
-          workspaces.length < 2
-            ? () => null
-            : (teamId: string | null): string | null => {
-                if (teamId === null) return null;
-                return store.workspaceForTeam(teamId)?.name ?? null;
-              };
-
-        const items = rows.map((row) =>
-          selectInboxItem({
-            row: {
-              ...row,
-              kind: row.kind as ReturnType<typeof classify>,
-            },
-            actor: row.actorId === null ? null : (members.get(row.actorId) ?? null),
-            issue:
-              row.issueId === null
-                ? null
-                : (() => {
-                    const issue = store.issue(row.issueId);
-                    return issue === null
-                      ? null
-                      : { identifier: issue.identifier, title: issue.title };
-                  })(),
-            blockers: [],
-            now: now(),
-            workspace: workspaceNameFor(row.teamId),
-          }),
-        );
+        const items = projectInboxRows(rows);
 
         // Opening the segment marks visible rows seen. **Seen is not
         // handled**: a row stays until it is dismissed.
@@ -2651,11 +2970,22 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         return { items, unseen: store.unseenInboxCount() };
       },
 
+      async inboxSummary() {
+        lastFrontendReadAt = now();
+        const newest = projectInboxRows(store.inbox({ limit: 1 }))[0] ?? null;
+        return {
+          unseen: store.unseenInboxCount(),
+          newest:
+            newest === null
+              ? null
+              : { text: newest.text, identifier: newest.identifier },
+        };
+      },
+
       async dismissInbox({ keys, all }) {
         const target = all === true ? store.inbox({ limit: 500 }).map((row) => row.key) : keys;
         store.dismissInbox(target, now());
         publish("linear:inbox");
-        publish("linear:data");
         return { ok: true, dismissed: target.length };
       },
     });
@@ -2716,7 +3046,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         lifetime.detach("backfill", async () => {
           await backfillOnce(false);
         });
-        publish("linear:data");
+        publishStructure();
         return { ok: true, message: `Bound ${team.name} (${team.key}) as ${role}.` };
       },
       unbind: async ({ teamKey, projectId }) => {
@@ -2744,7 +3074,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         }
         store.removeBinding(resolved, team.id);
         refreshBindings();
-        publish("linear:data");
+        publishStructure();
         return { ok: true, message: `Unbound ${team.key}.` };
       },
       sync: async (full) => {
@@ -2768,16 +3098,26 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
 
         const issue = store.issue(result.detail.id);
         if (issue === null) return { ok: false, text: `No issue called ${identifier}.` };
+        const issueComments = comments ? store.comments(issue.id) : [];
         return {
           ok: true,
-          text: issueDetailText(issue, toolContext(), {
-            ...(comments ? { comments: store.comments(issue.id) } : {}),
-            subIssues: result.detail.subIssues.map((child) => ({
-              identifier: child.identifier,
-              title: child.title,
-              done: child.done,
-            })),
-          }),
+          text: issueDetailText(
+            issue,
+            toolContext(
+              [issue.teamId],
+              [issue.assigneeId, ...issueComments.map((comment) => comment.userId)].filter(
+                (id): id is string => id !== null,
+              ),
+            ),
+            {
+              ...(comments ? { comments: issueComments } : {}),
+              subIssues: result.detail.subIssues.map((child) => ({
+                identifier: child.identifier,
+                title: child.title,
+                done: child.done,
+              })),
+            },
+          ),
         };
       },
 
@@ -2822,18 +3162,20 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         if ("message" in target) return { ok: false, message: target.message };
 
         let assigneeId: string | null = null;
+        let assigneeName = "nobody";
         if (who !== "none") {
           const needle = who.replace(/^@/, "").toLowerCase();
           const member =
             who === "me"
-              ? store.viewer()
-              : (store.members().find(
+              ? store.viewer([target.issue.teamId])
+              : (store.assignableMembers([target.issue.teamId]).find(
                   (entry) =>
                     entry.displayName.toLowerCase() === needle ||
                     entry.name.toLowerCase() === needle,
                 ) ?? null);
           if (member === null) return { ok: false, message: `No member called ${who}.` };
           assigneeId = member.id;
+          assigneeName = member.displayName;
         }
 
         try {
@@ -2843,11 +3185,10 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             { assigneeId },
             `${target.issue.identifier} wasn't reassigned`,
           );
-          const name =
-            assigneeId === null
-              ? "nobody"
-              : (store.members().find((entry) => entry.id === assigneeId)?.displayName ?? who);
-          return { ok: true, message: `${target.issue.identifier} assigned to ${name}.` };
+          return {
+            ok: true,
+            message: `${target.issue.identifier} assigned to ${assigneeName}.`,
+          };
         } catch (error) {
           return { ok: false, message: describeError(error) };
         }
@@ -2879,7 +3220,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             return {
               ok: false,
               message: `--priority takes 0 to 4. ${store
-                .priorityValues()
+                .priorityValues([issue.teamId])
                 .map((entry) => `${String(entry.priority)} ${entry.label}`)
                 .join(", ")}.`,
             };
@@ -3077,7 +3418,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           };
         }
 
-        const viewer = store.viewer();
+        const viewer = store.viewer([target.id]);
         try {
           const issue = await createIssue(mutations, clientForTeam, {
             teamId: target.id,
@@ -3133,7 +3474,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           teamIds = [named.id];
         }
 
-        const viewer = store.viewer();
+        const viewers = store.viewers(teamIds);
         const needle = state?.trim().toLowerCase();
         const stateIds =
           needle === undefined
@@ -3154,25 +3495,43 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           };
         }
 
-        const rows = store.queryIssues({
-          teamIds,
-          ...(stateIds === undefined ? {} : { stateIds }),
-          ...(assignee === "me" && viewer !== null ? { assigneeIds: [viewer.id] } : {}),
-          includeCompleted: true,
-          sort: "updated",
-          limit,
-        });
+        const rows =
+          assignee === "me" && viewers.length === 0
+            ? []
+            : store.queryIssues({
+                teamIds,
+                ...(stateIds === undefined ? {} : { stateIds }),
+                ...(assignee === "me"
+                  ? { assigneeIds: viewers.map((viewer) => viewer.id) }
+                  : {}),
+                includeCompleted: true,
+                sort: "updated",
+                limit,
+              });
 
         const filtered =
           assignee === "none" ? rows.filter((row) => row.assigneeId === null) : rows;
 
-        const members = new Map(store.members().map((entry) => [entry.id, entry]));
+        const members = new Map(
+          store
+            .membersByIds(
+              filtered
+                .map((row) => row.assigneeId)
+                .filter((id): id is string => id !== null),
+            )
+            .map((entry) => [entry.id, entry]),
+        );
+        const stateNames = new Map(
+          teamIds
+            .flatMap((teamId) => store.workflowStates(teamId))
+            .map((state) => [state.id, state.name] as const),
+        );
         return {
           ok: true,
           message: filtered.length === 0 ? "Nothing matches that." : null,
           rows: filtered.map((row) => [
             row.identifier,
-            row.stateId === null ? "" : (store.workflowState(row.stateId)?.name ?? ""),
+            row.stateId === null ? "" : (stateNames.get(row.stateId) ?? ""),
             row.title,
             row.assigneeId === null ? "" : (members.get(row.assigneeId)?.displayName ?? ""),
           ]),
@@ -3253,11 +3612,13 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         // every write path validates against, so a refresh that skipped it
         // would leave the picker showing the previous workspace's columns.
         const expanded = expandTeams(bound, teams, (await settings.get()).includeSubTeams);
-        for (const [slot, group] of teamsBySlot(expanded)) {
-          await refreshTeamVocabulary(backfillDepsFor(slot), group);
-        }
+        await Promise.all(
+          [...teamsBySlot(expanded)].map(([slot, group]) =>
+            refreshTeamVocabulary(backfillDepsFor(slot), group),
+          ),
+        );
 
-        publish("linear:data");
+        publishStructure();
         const names = store.workspaces().map((workspace) => workspace.name);
         return {
           ok: true,
@@ -3277,6 +3638,8 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
               "This deletes the local copy of your Linear workspace from this machine —",
               "issues, descriptions, comments and member details — and every cursor with it.",
               "",
+              "Any registered webhooks are removed from Linear first.",
+              "",
               "It does NOT remove the API key, and it does not revoke it at Linear.",
               "",
               "Run it again with --yes if that is what you want.",
@@ -3284,12 +3647,19 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             ].join("\n"),
           };
         }
+        const cleanup = await deleteRegisteredWebhooks();
+        if (cleanup.failures.length > 0) {
+          return { ok: false, text: webhookCleanupFailure(cleanup.failures) };
+        }
         store.forgetEverything();
         await kv.clearAll();
         webhookIds.clear();
         bindingSnapshot = [];
         cached = null;
-        return { ok: true, text: "Local copy removed. The API key is untouched.\n" };
+        return {
+          ok: true,
+          text: "Remote webhooks and the local copy were removed. The API key is untouched.\n",
+        };
       },
 
       webhook: async ({ action, target: target_ }) => {
@@ -3323,10 +3693,13 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         if (action === "disable") {
           // Deletion happens only on explicit user action — this is one of the
           // three places that qualifies.
-          for (const key of await kv.keys("webhook:")) await kv.remove(key);
-          webhookIds.clear();
-          store.putLocalSecret(WEBHOOK_SECRET_KEY, "");
-          return { ok: true, text: "Webhook records removed. The plugin polls.\n" };
+          const cleanup = await deleteRegisteredWebhooks();
+          cached = null;
+          publish("linear:data");
+          if (cleanup.failures.length > 0) {
+            return { ok: false, text: webhookCleanupFailure(cleanup.failures) };
+          }
+          return { ok: true, text: "Webhooks removed from Linear. The plugin polls.\n" };
         }
 
         if (action === "enable") {
@@ -3354,23 +3727,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         const rows = store.inbox({ limit: 50 });
         if (rows.length === 0) return { ok: true, text: "Nothing is waiting for you in Linear." };
 
-        const members = new Map(store.members().map((entry) => [entry.id, entry]));
-        const lines = rows.map((row) => {
-          const view = selectInboxItem({
-            row: { ...row, kind: row.kind as ReturnType<typeof classify> },
-            actor: row.actorId === null ? null : (members.get(row.actorId) ?? null),
-            issue:
-              row.issueId === null
-                ? null
-                : (() => {
-                    const issue = store.issue(row.issueId);
-                    return issue === null
-                      ? null
-                      : { identifier: issue.identifier, title: issue.title };
-                  })(),
-            blockers: [],
-            now: now(),
-          });
+        const lines = projectInboxRows(rows).map((view) => {
           return [view.unseen ? "●" : " ", view.age, view.text];
         });
         return {
@@ -3406,17 +3763,31 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           const result = bindManually(threadId, null, null);
           return { ok: result.ok, message: result.message ?? "Unlinked." };
         }
-        let issue = store.issue(identifier) ?? store.issueByIdentifier(identifier);
-        if (issue === null) {
-          issue = await lifetime.runAsync("issue", () => refreshIssue(identifier), null);
-        }
-        if (issue === null) return { ok: false, message: `No issue called ${identifier}.` };
         const thread = await lifetime.runAsync(
           "thread",
           () => bb.sdk.threads.get({ threadId }),
           null,
         );
-        const result = bindManually(threadId, issue.id, thread?.projectId ?? null);
+        const projectId = thread?.projectId ?? null;
+        if (projectId === null) {
+          return { ok: false, message: "This thread has no project, so no Linear scope can be established." };
+        }
+        const current = scopeFor(projectId, bindingSnapshot);
+        let issue = store.issue(identifier);
+        if (issue === null) {
+          issue = store
+            .issuesByIdentifier(identifier)
+            .find((entry) => current.readTeamIds.includes(entry.teamId)) ?? null;
+        }
+        if (issue === null) {
+          issue = await lifetime.runAsync(
+            "issue",
+            () => refreshIssue(identifier, current.readTeamIds),
+            null,
+          );
+        }
+        if (issue === null) return { ok: false, message: `No readable issue called ${identifier}.` };
+        const result = bindManually(threadId, issue.id, projectId);
         return {
           ok: result.ok,
           message: result.message ?? `Linked this thread to ${issue.identifier}.`,
@@ -3426,20 +3797,28 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       now,
     };
 
-    function toolContext() {
+    function toolContext(teamIds: readonly string[], memberIds: readonly string[] = []) {
       return {
         states: new Map(
-          store
-            .teams()
+          teamIds
+            .map((teamId) => store.team(teamId))
+            .filter((team): team is NonNullable<typeof team> => team !== null)
             .flatMap((team) => store.workflowStates(team.id))
             .map((state) => [state.id, state] as const),
         ),
-        members: new Map(store.members().map((member) => [member.id, member] as const)),
-        labels: new Map(store.labels([]).map((label) => [label.id, label] as const)),
-        priorityLabels: new Map(
-          store.priorityValues().map((value) => [value.priority, value.label] as const),
+        members: new Map(
+          store.membersByIds(memberIds).map((member) => [member.id, member] as const),
         ),
-        teams: new Map(store.teams().map((team) => [team.id, team] as const)),
+        labels: new Map(store.labels(teamIds).map((label) => [label.id, label] as const)),
+        priorityLabels: new Map(
+          store.priorityValues(teamIds).map((value) => [value.priority, value.label] as const),
+        ),
+        teams: new Map(
+          teamIds
+            .map((teamId) => store.team(teamId))
+            .filter((team): team is NonNullable<typeof team> => team !== null)
+            .map((team) => [team.id, team] as const),
+        ),
       };
     }
 
@@ -3456,30 +3835,6 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       identifier: string,
       projectId: string | undefined,
     ): Promise<{ issue: NonNullable<ReturnType<Store["issue"]>>; team: { name: string } } | { message: string }> {
-      let issue = store.issue(identifier);
-      if (issue === null) {
-        // Every identifier match, because ENG-42 can exist in two connected
-        // workspaces at once — and a WRITE that inherits whichever row the
-        // index favours lands on the other company's board.
-        const matches = store.issuesByIdentifier(identifier);
-        if (matches.length > 1) {
-          const sides = matches
-            .map(
-              (row) =>
-                `"${row.title}" in ${store.workspaceForTeam(row.teamId)?.name ?? "an unknown workspace"}`,
-            )
-            .join(" and ");
-          return {
-            message: `${identifier} exists in more than one connected workspace — ${sides}. Nothing was changed; use the issue URL or id instead of the identifier.`,
-          };
-        }
-        issue = matches[0] ?? null;
-      }
-      if (issue === null) {
-        issue = await lifetime.runAsync("issue", () => refreshIssue(identifier), null);
-      }
-      if (issue === null) return { message: `No issue called ${identifier}.` };
-
       const boundProjects = [...new Set(bindingSnapshot.map((row) => row.projectId))];
       const resolved = projectId ?? (boundProjects.length === 1 ? boundProjects[0] : undefined);
       if (resolved === undefined) {
@@ -3492,6 +3847,35 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       }
 
       const scope = scopeFor(resolved, bindingSnapshot);
+      let issue = store.issue(identifier);
+      if (issue !== null && !scope.writeTeamIds.includes(issue.teamId)) issue = null;
+      if (issue === null) {
+        // Every identifier match, because ENG-42 can exist in two connected
+        // workspaces at once — and a WRITE that inherits whichever row the
+        // index favours lands on the other company's board.
+        const matches = store.issuesByIdentifier(identifier);
+        const inScope = matches.filter((row) => scope.writeTeamIds.includes(row.teamId));
+        if (inScope.length > 1) {
+          const sides = inScope
+            .map(
+              (row) =>
+                `"${row.title}" in ${store.workspaceForTeam(row.teamId)?.name ?? "an unknown workspace"}`,
+            )
+            .join(" and ");
+          return {
+            message: `${identifier} exists in more than one connected workspace — ${sides}. Nothing was changed; use the issue URL or id instead of the identifier.`,
+          };
+        }
+        issue = inScope[0] ?? null;
+      }
+      if (issue === null) {
+        issue = await lifetime.runAsync(
+          "issue",
+          () => refreshIssue(identifier, scope.writeTeamIds),
+          null,
+        );
+      }
+      if (issue === null) return { message: `No issue called ${identifier}.` };
       const team = store.team(issue.teamId);
       if (!scope.writeTeamIds.includes(issue.teamId)) {
         const allowed = scope.writeTeamIds
@@ -3559,19 +3943,20 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         try {
           // Grouped by workspace for the same reason every other read is: the
           // filter only resolves for the key that issued it.
-          const found: IssueRow[] = [];
-          for (const [slot, group] of teamsBySlot(teamIds)) {
-            const result = await clientForSlot(slot).searchIssues(query, group, {
-              initiator: "user",
-              ...(signal ? { signal } : {}),
-            });
-            const rows = result.searchIssues.nodes.map(toIssueInput);
-            store.putIssues(rows, now());
-            for (const row of rows) {
-              const stored = store.issue(row.id);
-              if (stored !== null) found.push(stored);
-            }
-          }
+          const batches = await Promise.all(
+            [...teamsBySlot(teamIds)].map(async ([slot, group]) => {
+              const result = await clientForSlot(slot).searchIssues(query, group, {
+                initiator: "user",
+                ...(signal ? { signal } : {}),
+              });
+              return result.searchIssues.nodes
+                .map(toIssueInput)
+                .filter((row) => group.includes(row.teamId));
+            }),
+          );
+          const inScopeRows = batches.flat();
+          store.putIssues(inScopeRows, now());
+          const found = store.issuesByIds(inScopeRows.map((row) => row.id));
           publish("linear:data");
           return found;
         } catch (error) {
@@ -3580,25 +3965,41 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         }
       },
 
-      runView: async (viewId, signal) => {
-        try {
-          // The view runs at Linear. `filterData` is a JSONObject in Linear's
-          // internal dialect and reimplementing it is not an option.
-          const result = await client.customViewIssues(viewId, null, {
-            initiator: "user",
-            ...(signal ? { signal } : {}),
-          });
-          const rows = (result.customView.issues.nodes as IssueNode[]).map(toIssueInput);
-          store.putIssues(rows, now());
-          publish("linear:data");
-          const issues = rows
-            .map((row) => store.issue(row.id))
-            .filter((row): row is IssueRow => row !== null);
-          return { name: result.customView.name, issues };
-        } catch (error) {
-          lifetime.log("debug", `Saved view ${viewId} could not be read: ${describeError(error)}`);
-          return null;
-        }
+      runView: async (viewId, readTeamIds, signal) => {
+        const results = await Promise.all(
+          [...teamsBySlot(readTeamIds)].map(async ([slot, group]) => {
+            try {
+              // The view runs at Linear. `filterData` is a JSONObject in
+              // Linear's internal dialect and reimplementing it is not an option.
+              const result = await clientForSlot(slot).customViewIssues(viewId, null, {
+                initiator: "user",
+                ...(signal ? { signal } : {}),
+              });
+              return {
+                name: result.customView.name,
+                rows: (result.customView.issues.nodes as IssueNode[])
+                  .map(toIssueInput)
+                  .filter((row) => group.includes(row.teamId)),
+              };
+            } catch (error) {
+              if (!(isLinearError(error) && error.code === "query")) {
+                lifetime.log(
+                  "debug",
+                  `Saved view ${viewId} could not be read: ${describeError(error)}`,
+                );
+              }
+              return null;
+            }
+          }),
+        );
+        const match = results.find((result) => result !== null) ?? null;
+        if (match === null) return null;
+        store.putIssues(match.rows, now());
+        publish("linear:data");
+        return {
+          name: match.name,
+          issues: store.issuesByIds(match.rows.map((row) => row.id)),
+        };
       },
 
       startThread: async ({ issueId, projectId }) => {
@@ -3616,19 +4017,13 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         if (cached !== undefined) return cached;
         const suggestion = suggestions.get(threadId);
         if (suggestion !== undefined) {
-          return `This thread is not bound to a Linear issue. Best guess by title: ${suggestion.identifier} — "${suggestion.title}". Bind it with linear_thread_bind if that is right.`;
+          return `This thread is not bound to a Linear issue. Best guess by title: ${safeIssueReference(suggestion.identifier, suggestion.issueId)}. Bind it with linear_thread_bind if that is right.`;
         }
         return "This thread is not bound to a Linear issue. Bind one with linear_thread_bind, or work by identifier with the other linear_* tools.";
       },
 
-      bindThread: async (threadId, idOrIdentifier) => {
-        const thread = await lifetime.runAsync(
-          "thread",
-          () => bb.sdk.threads.get({ threadId }),
-          null,
-        );
-        return bindManually(threadId, idOrIdentifier, thread?.projectId ?? null);
-      },
+      bindThread: async (threadId, idOrIdentifier, projectId) =>
+        bindManually(threadId, idOrIdentifier, projectId),
 
       now,
     });
@@ -3652,7 +4047,13 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      */
     for (const key of await kv.keys("webhook:")) {
       const record = await kv.readOptional(key, webhookRecordSchema);
-      if (record !== undefined) webhookIds.set(key.slice("webhook:".length), record.id);
+      const teamId = key.slice("webhook:".length);
+      if (
+        record !== undefined &&
+        (store.localSecret(webhookSecretKey(teamId)) ?? "") !== ""
+      ) {
+        webhookIds.set(teamId, record.id);
+      }
     }
 
     /* ── Status on load ──────────────────────────────────────────────────── */
@@ -3660,8 +4061,129 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     // `configure` is synchronous, so the values it reads have to be here
     // already. `onChange` keeps them current without a reload.
     let initialSettings = await settings.get();
-    settings.onChange((next) => {
+    settings.onChange((next, previous) => {
       initialSettings = next;
+      const changedCredentialSlots = CREDENTIAL_SLOTS.filter(
+        (slot) => (previous[slot]?.trim() ?? "") !== (next[slot]?.trim() ?? ""),
+      );
+      for (const slot of changedCredentialSlots) {
+        // A breaker and a request budget belong to one credential, not to the
+        // settings field it occupied. Reusing either after replacement can
+        // leave a fresh key paused by the old key's outage.
+        clients.delete(slot);
+        cachedStates.delete(slot);
+      }
+      if (changedCredentialSlots.length > 0) {
+        cached = null;
+        publish("linear:connection");
+      }
+      const removedCredentialSlots = CREDENTIAL_SLOTS.filter((slot) => {
+        const before = previous[slot]?.trim() ?? "";
+        const after = next[slot]?.trim() ?? "";
+        return before !== "" && before !== after;
+      });
+      const webhookUrlCleared =
+        previous.webhookUrl.trim() !== "" && next.webhookUrl.trim() === "";
+      if (removedCredentialSlots.length === 0 && !webhookUrlCleared) return;
+
+      // Capture only the old credential object and its team ids. It stays in
+      // this continuation's memory long enough to delete the remote webhook;
+      // it is never written to kv, SQLite, argv, a prompt or a log.
+      const removalPlans = removedCredentialSlots.flatMap((slot) => {
+        const credential = patFromSetting(previous[slot]);
+        if (credential === null) return [];
+        const workspaceIds = store
+          .workspaces()
+          .filter((workspace) => workspace.slot === slot)
+          .map((workspace) => workspace.id);
+        const teamIds = store
+          .teams()
+          .filter((team) => {
+            const workspace = store.workspaceForTeam(team.id);
+            const owner =
+              workspace !== null && isCredentialSlot(workspace.slot)
+                ? workspace.slot
+                : PRIMARY_SLOT;
+            return owner === slot;
+          })
+          .map((team) => team.id);
+        blockedWorkspaceForget.add(slot);
+        return [{ slot, credential, teamIds, workspaceIds }];
+      });
+
+      const previousCleanup = credentialCleanup;
+      const run = previousCleanup.then(async () => {
+        const removedTeamIds = new Set(removalPlans.flatMap((plan) => plan.teamIds));
+        for (const plan of removalPlans) {
+          const oldClient = makeClient({
+            getCredential: async () => plan.credential,
+            // Removing or replacing the key is the user's explicit request to
+            // stop this remote delivery path, independent of the normal write
+            // feature switch.
+            gateMutation: () => ({ allowed: true }),
+            log: (level, message) => lifetime.log(level, message),
+            signal: lifetime.signal,
+            now,
+          });
+          const cleanup = await deleteRegisteredWebhooks({
+            teamIds: new Set(plan.teamIds),
+            clientForTeam: () => oldClient,
+          });
+          if (cleanup.failures.length === 0) {
+            // Positive settings-change evidence is stronger than the detached
+            // discovery heuristic: the user actually removed or replaced this
+            // key. With the remote delivery path gone, its mirrored data and
+            // cursors can now be removed even when every key was cleared.
+            for (const workspaceId of plan.workspaceIds) {
+              const forgotten = store.forgetWorkspace(workspaceId);
+              for (const teamId of forgotten) {
+                await kv.remove(KV.backfilled(teamId));
+              }
+            }
+            await kv.remove(KV.notificationWatermarkFor(plan.slot));
+            blockedWorkspaceForget.delete(plan.slot);
+          } else {
+            // Do not keep accepting payloads after the user removed the key.
+            // The id and team mapping remain solely so re-adding the key can
+            // retry deletion; the signing capability does not.
+            for (const teamId of cleanup.failures) {
+              store.putLocalSecret(webhookSecretKey(teamId), "");
+              webhookIds.delete(teamId);
+            }
+            lifetime.log(
+              "warn",
+              `The ${slotLabel(plan.slot)} was removed, but Linear did not confirm deletion of ${cleanup.failures.length} webhook(s). Re-add that key and run webhook disable to retry.`,
+            );
+          }
+        }
+
+        if (webhookUrlCleared) {
+          const cleanup =
+            removalPlans.length === 0
+              ? await deleteRegisteredWebhooks()
+              : await deleteRegisteredWebhooks({
+                  teamIds: new Set(
+                    store
+                      .teams()
+                      .map((team) => team.id)
+                      .filter((teamId) => !removedTeamIds.has(teamId)),
+                  ),
+                });
+          if (cleanup.failures.length > 0) {
+            lifetime.log(
+              "warn",
+              `The webhook URL was cleared, but ${webhookCleanupFailure(cleanup.failures).trim()}`,
+            );
+          }
+        }
+        cached = null;
+        publishStructure();
+      });
+      credentialCleanup = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      lifetime.detach("webhook-delete", () => run);
     });
 
     const initial = initialSettings;

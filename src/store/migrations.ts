@@ -562,4 +562,120 @@ export const MIGRATIONS: string[] = [
      user_id TEXT NOT NULL,
      PRIMARY KEY (team_id, user_id)
    )`,
+
+  /* ── M22: workspace-owned vocabulary ─────────────────────────────────── */
+
+  // Linear ids are globally unique, but the right to *see* their metadata is
+  // not. These ownership tables let the shared mirror keep deduplicated rows
+  // while every project-scoped read selects only its bound workspaces.
+  `CREATE TABLE IF NOT EXISTS workspace_label (
+     workspace_id TEXT NOT NULL,
+     label_id TEXT NOT NULL,
+     PRIMARY KEY (workspace_id, label_id)
+   )`,
+
+  `CREATE TABLE IF NOT EXISTS workspace_member (
+     workspace_id TEXT NOT NULL,
+     user_id TEXT NOT NULL,
+     PRIMARY KEY (workspace_id, user_id)
+   )`,
+
+  `CREATE TABLE IF NOT EXISTS workspace_project_status (
+     workspace_id TEXT NOT NULL,
+     status_id TEXT NOT NULL,
+     PRIMARY KEY (workspace_id, status_id)
+   )`,
+
+  // Priority is only unique *inside* a workspace, so this table owns the
+  // value as well as its scope instead of pointing at the legacy global row.
+  `CREATE TABLE IF NOT EXISTS workspace_priority_value (
+     workspace_id TEXT NOT NULL,
+     priority INTEGER NOT NULL,
+     label TEXT NOT NULL,
+     PRIMARY KEY (workspace_id, priority)
+   )`,
+
+  // Team-owned labels retain the recorded team's workspace. A workspace-level
+  // label is attributable only when exactly one workspace exists; with two or
+  // more, guessing "primary" would expose whichever workspace last wrote it.
+  `INSERT OR IGNORE INTO workspace_label (workspace_id, label_id)
+     SELECT COALESCE(
+              team.workspace_id,
+              (SELECT workspace.id FROM workspace
+                ORDER BY workspace.slot = 'apiKey' DESC, workspace.slot LIMIT 1)
+            ), label.id
+       FROM label JOIN team ON team.id = label.team_id
+      WHERE EXISTS (SELECT 1 FROM workspace)
+     UNION
+     SELECT workspace.id, label.id
+       FROM workspace CROSS JOIN label
+      WHERE label.team_id IS NULL
+        AND (SELECT COUNT(*) FROM workspace) = 1`,
+
+  // Team membership and each workspace's viewer recover only the mappings
+  // that are knowable on upgrade. Unattached users stay unavailable until the
+  // next sync rather than being guessed into the wrong connected workspace.
+  `INSERT OR IGNORE INTO workspace_member (workspace_id, user_id)
+     SELECT COALESCE(
+              team.workspace_id,
+              (SELECT workspace.id FROM workspace
+                ORDER BY workspace.slot = 'apiKey' DESC, workspace.slot LIMIT 1)
+            ), team_member.user_id
+       FROM team_member JOIN team ON team.id = team_member.team_id
+     WHERE EXISTS (SELECT 1 FROM workspace)
+     UNION
+     SELECT workspace.id, workspace.viewer_id FROM workspace
+     UNION
+     SELECT workspace.id, member.id
+       FROM workspace CROSS JOIN member
+      WHERE (SELECT COUNT(*) FROM workspace) = 1`,
+
+  `INSERT OR IGNORE INTO workspace_project_status (workspace_id, status_id)
+     SELECT (SELECT workspace.id FROM workspace
+              ORDER BY workspace.slot = 'apiKey' DESC, workspace.slot LIMIT 1), project_status.id
+       FROM project_status
+      WHERE (SELECT COUNT(*) FROM workspace) = 1`,
+
+  `INSERT OR IGNORE INTO workspace_priority_value (workspace_id, priority, label)
+     SELECT (SELECT workspace.id FROM workspace
+              ORDER BY workspace.slot = 'apiKey' DESC, workspace.slot LIMIT 1),
+            priority_value.priority, priority_value.label
+       FROM priority_value
+      WHERE (SELECT COUNT(*) FROM workspace) = 1`,
+
+  /* ── M23: workspace-owned inbox ──────────────────────────────────────── */
+
+  `ALTER TABLE inbox ADD COLUMN workspace_id TEXT`,
+
+  // Team notifications inherit the team's workspace. A legacy team row without
+  // an owner came from the primary slot. Rows without a matching team are not
+  // attributable: another configured slot may have polled before discovery
+  // created its workspace/team records, even if only one workspace is stored.
+  `UPDATE inbox
+      SET workspace_id = COALESCE(
+        (SELECT team.workspace_id FROM team WHERE team.id = inbox.team_id),
+        CASE WHEN inbox.team_id IS NOT NULL
+                   AND EXISTS (SELECT 1 FROM team WHERE team.id = inbox.team_id) THEN
+          (SELECT workspace.id FROM workspace
+            ORDER BY workspace.slot = 'apiKey' DESC, workspace.slot LIMIT 1)
+        END
+      )`,
+
+  // Ambiguous legacy text is safer to discard than to expose under whichever
+  // workspace happens to remain after a disconnect.
+  `DELETE FROM inbox WHERE workspace_id IS NULL`,
+
+  // Linear grouping keys are unique inside one inbox, not across two
+  // connected workspaces. Namespace old rows the same way new writes are.
+  `UPDATE inbox SET key = workspace_id || ':' || key`,
+
+  `CREATE INDEX IF NOT EXISTS inbox_by_workspace ON inbox (workspace_id, created_at DESC)`,
+
+  /* ── M24: bounded hot-path indexes ────────────────────────────────────── */
+
+  `CREATE INDEX IF NOT EXISTS issue_by_parent
+     ON issue (parent_id, sub_issue_sort_order, sort_order)`,
+
+  `CREATE INDEX IF NOT EXISTS inbox_by_dismissed
+     ON inbox (dismissed_at) WHERE dismissed_at IS NOT NULL`,
 ];

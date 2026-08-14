@@ -8,6 +8,7 @@ import {
 } from "../src/notify/classify.js";
 import { selectInboxItem, toInboxRow, unseenCount } from "../src/notify/inbox.js";
 import { claimAndSend, deliverToPeer, type PeerDeps } from "../src/notify/deliver.js";
+import { readAllNotifications } from "../src/notify/pages.js";
 import type { NotificationNode } from "../src/linear/types.js";
 import { createTestStore, member, NOW } from "./helpers/store.js";
 
@@ -36,6 +37,62 @@ function node(overrides: Partial<NotificationNode> = {}): NotificationNode {
     ...overrides,
   };
 }
+
+describe("notification pagination", () => {
+  it("follows every cursor before advancing the watermark", async () => {
+    const notifications = vi
+      .fn()
+      .mockResolvedValueOnce({
+        notifications: {
+          nodes: [node({ id: "n_1" })],
+          pageInfo: { hasNextPage: true, endCursor: "cursor-1" },
+        },
+      })
+      .mockResolvedValueOnce({
+        notifications: {
+          nodes: [node({ id: "n_2" })],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      });
+
+    const rows = await readAllNotifications({ notifications }, "2026-08-12T00:00:00Z");
+
+    expect(rows.map((row) => row.id)).toEqual(["n_1", "n_2"]);
+    expect(notifications.mock.calls.map((call) => call.slice(0, 2))).toEqual([
+      ["2026-08-12T00:00:00Z", null],
+      ["2026-08-12T00:00:00Z", "cursor-1"],
+    ]);
+  });
+
+  it("fails closed on a repeated cursor", async () => {
+    const notifications = vi.fn().mockResolvedValue({
+      notifications: {
+        nodes: [],
+        pageInfo: { hasNextPage: true, endCursor: "same" },
+      },
+    });
+    await expect(
+      readAllNotifications({ notifications }, "2026-08-12T00:00:00Z"),
+    ).rejects.toThrow("invalid notification cursor");
+  });
+
+  it("bounds a malicious stream of unique cursors", async () => {
+    let page = 0;
+    const notifications = vi.fn().mockImplementation(async () => {
+      page += 1;
+      if (page > 200) throw new Error("upstream test stop");
+      return {
+        notifications: {
+          nodes: [],
+          pageInfo: { hasNextPage: true, endCursor: `cursor-${String(page)}` },
+        },
+      };
+    });
+    await expect(
+      readAllNotifications({ notifications }, "2026-08-12T00:00:00Z"),
+    ).rejects.toThrow("too many notification pages");
+  });
+});
 
 describe("classify", () => {
   it("routes on the category enum", () => {
@@ -319,7 +376,7 @@ describe("deliverToPeer", () => {
 
 describe("the inbox", () => {
   it("reads as one sentence with an actor, a verb and an object", () => {
-    const row = toInboxRow(node(), NOW);
+    const row = toInboxRow(node(), NOW, "ws");
     const view = selectInboxItem({
       row,
       actor: member("u_kai", "Kai Rivers"),
@@ -331,7 +388,7 @@ describe("the inbox", () => {
   });
 
   it("names the blocker when it knows one", () => {
-    const row = toInboxRow(node({ type: "issueBlocking", category: "subscriptions" }), NOW);
+    const row = toInboxRow(node({ type: "issueBlocking", category: "subscriptions" }), NOW, "ws");
     const view = selectInboxItem({
       row,
       actor: null,
@@ -343,23 +400,23 @@ describe("the inbox", () => {
   });
 
   it("falls back to Linear's own words when it does not know the actor", () => {
-    const row = toInboxRow(node(), NOW);
+    const row = toInboxRow(node(), NOW, "ws");
     const view = selectInboxItem({ row, actor: null, issue: null, blockers: [], now: NOW });
     expect(view.text).toBe("Kai assigned you ENG-42");
   });
 
   it("keeps a row read elsewhere in the list but out of the unseen count", () => {
     // A row disappearing under your cursor is worse than a stale dot.
-    const read = { ...toInboxRow(node(), NOW), linearReadAt: NOW };
+    const read = { ...toInboxRow(node(), NOW, "ws"), linearReadAt: NOW };
     const view = selectInboxItem({ row: read, actor: null, issue: null, blockers: [], now: NOW });
     expect(view.unseen).toBe(false);
     expect(unseenCount([read])).toBe(0);
-    expect(unseenCount([toInboxRow(node(), NOW)])).toBe(1);
+    expect(unseenCount([toInboxRow(node(), NOW, "ws")])).toBe(1);
   });
 
   it("does not un-see a row the poller sees again", () => {
     const store = createTestStore();
-    const row = toInboxRow(node(), NOW);
+    const row = toInboxRow(node(), NOW, "ws");
     store.putInbox([row]);
     store.markInboxSeen([row.key], NOW);
     store.putInbox([row]);
@@ -368,7 +425,7 @@ describe("the inbox", () => {
 
   it("keeps a dismissed row out of the list", () => {
     const store = createTestStore();
-    const row = toInboxRow(node(), NOW);
+    const row = toInboxRow(node(), NOW, "ws");
     store.putInbox([row]);
     store.dismissInbox([row.key], NOW);
     expect(store.inbox()).toEqual([]);

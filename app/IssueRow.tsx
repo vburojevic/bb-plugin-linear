@@ -148,15 +148,7 @@ function RowBody({
                 title={row.assignee.name}
                 aria-hidden
               >
-                {row.assignee.avatarUrl !== null ? (
-                  <img
-                    src={row.assignee.avatarUrl}
-                    alt=""
-                    className="size-5 rounded-full object-cover"
-                  />
-                ) : (
-                  row.assignee.initials
-                )}
+                {row.assignee.initials}
               </span>
             ) : (
               // An empty slot rather than no slot: without it the age column

@@ -318,6 +318,104 @@ describe("sub-issue progress", () => {
   });
 });
 
+describe("bounded hot-path reads", () => {
+  it("reads requested issues and members without hydrating whole workspaces", () => {
+    const store = createTestStore();
+    store.putWorkspace(
+      {
+        id: "ws",
+        slot: "apiKey",
+        name: "Workspace",
+        urlKey: "workspace",
+        viewerId: "u1",
+        viewerName: "Ada",
+        gitBranchFormat: null,
+      },
+      NOW,
+    );
+    store.putTeams([team("team_eng", "ENG", { workspaceId: "ws" })], NOW);
+    store.putMembers([
+      { ...member("u1", "Ada", true), workspaceId: "ws" },
+      { ...member("u2", "Grace"), workspaceId: "ws" },
+      { ...member("u3", "Linus"), workspaceId: "ws" },
+    ]);
+    store.replaceTeamMembers("team_eng", ["u1", "u2"]);
+    store.putIssues(
+      [
+        issue({ id: "parent", teamId: "team_eng" }),
+        issue({ id: "c2", teamId: "team_eng", parentId: "parent", subIssueSortOrder: 2 }),
+        issue({ id: "c1", teamId: "team_eng", parentId: "parent", subIssueSortOrder: 1 }),
+        issue({ id: "other", teamId: "team_eng" }),
+      ],
+      NOW,
+    );
+    store.linkThread({
+      threadId: "thread-1",
+      issueId: "c1",
+      teamId: "team_eng",
+      projectId: "project-1",
+      createdAt: NOW,
+      origin: "manual",
+    });
+    store.linkThread({
+      threadId: "thread-2",
+      issueId: "other",
+      teamId: "team_eng",
+      projectId: "project-1",
+      createdAt: NOW,
+      origin: "manual",
+    });
+
+    expect(store.issuesByIds(["c2", "other"]).map((row) => row.id).sort()).toEqual([
+      "c2",
+      "other",
+    ]);
+    expect(store.membersByIds(["u2"]).map((row) => row.id)).toEqual(["u2"]);
+    expect(store.assignableMembers(["team_eng"]).map((row) => row.id)).toEqual(["u1", "u2"]);
+    expect(store.childIssues("parent", 10).map((row) => row.id)).toEqual(["c1", "c2"]);
+    expect(store.threadLinksByThreadIds(["thread-2"]).map((row) => row.threadId)).toEqual([
+      "thread-2",
+    ]);
+  });
+
+  it("prunes dismissed inbox history in bounded batches", () => {
+    const store = createTestStore();
+    const row = (key: string, dismissedAt: number | null) => ({
+      key,
+      workspaceId: "ws",
+      kind: "other",
+      issueId: null,
+      teamId: null,
+      actorId: null,
+      title: key,
+      body: null,
+      url: null,
+      createdAt: NOW,
+      seenAt: null,
+      dismissedAt,
+      linearReadAt: null,
+    });
+    store.putInbox([
+      row("old-1", NOW - 20),
+      row("old-2", NOW - 10),
+      row("recent", NOW),
+      row("open", null),
+    ]);
+
+    expect(store.pruneInbox(NOW - 5, 1)).toBe(1);
+    expect(store.inbox({ includeDismissed: true, limit: 10 }).map((entry) => entry.key).sort()).toEqual([
+      "old-2",
+      "open",
+      "recent",
+    ]);
+    expect(store.pruneInbox(NOW - 5, 10)).toBe(1);
+    expect(store.inbox({ includeDismissed: true, limit: 10 }).map((entry) => entry.key).sort()).toEqual([
+      "open",
+      "recent",
+    ]);
+  });
+});
+
 describe("forgetEverything", () => {
   it("leaves an empty schema and no data", () => {
     // Disconnect means it. `bb plugin remove` does not do this — the host

@@ -501,7 +501,7 @@ function DueDateEditor({
 
 function Avatar({
   initials,
-  avatarUrl,
+  avatarUrl: _avatarUrl,
 }: {
   initials: string;
   avatarUrl: string | null;
@@ -511,7 +511,7 @@ function Avatar({
       className="grid size-4 shrink-0 place-items-center overflow-hidden rounded-full bg-muted text-[8px] font-medium text-muted-foreground"
       aria-hidden
     >
-      {avatarUrl === null ? initials : <img src={avatarUrl} alt="" className="size-4 object-cover" />}
+      {initials}
     </span>
   );
 }

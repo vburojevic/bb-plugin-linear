@@ -159,7 +159,11 @@ export interface LinearClient {
   tick(variables: Record<string, unknown>, options?: CallOptions): Promise<TickResult>;
 
   /** The viewer's own Linear inbox, on its own cursor and its own clock. */
-  notifications(since: string, options?: CallOptions): Promise<NotificationsResult>;
+  notifications(
+    since: string,
+    after: string | null,
+    options?: CallOptions,
+  ): Promise<NotificationsResult>;
 
   /** Projects, their milestones, and the bound teams' cycles. */
   breadth(teamIds: readonly string[], options?: CallOptions): Promise<BreadthResult>;
@@ -308,10 +312,10 @@ export const createLinearClient: LinearClientFactory = (session, options) => {
     tick: (variables, callOptions) =>
       transport.execute<TickResult>(TICK, call(callOptions, variables)),
 
-    notifications: (since, callOptions) =>
+    notifications: (since, after, callOptions) =>
       transport.execute<NotificationsResult>(
         NOTIFICATIONS,
-        call(callOptions, { since, first: NOTIFICATION_PAGE_SIZE }),
+        call(callOptions, { since, first: NOTIFICATION_PAGE_SIZE, after }),
       ),
 
     breadth: (teamIds, callOptions) =>

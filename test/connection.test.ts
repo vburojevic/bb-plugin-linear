@@ -119,6 +119,7 @@ describe("describeConnection", () => {
   it("has a sentence for every state", () => {
     const states = [
       { kind: "no-credential" },
+      { kind: "checking" },
       connectedState({ result: VIEWER, budget: null, writeRefusal: null, checkedAt: NOW }),
       { kind: "invalid-key", message: "x" },
       { kind: "revoked", message: "x" },

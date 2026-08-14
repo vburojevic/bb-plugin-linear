@@ -1,9 +1,9 @@
 import type { BbPluginApi, PluginMentionItem } from "@bb/plugin-sdk";
 import { scopeFor } from "./bindings.js";
 import { truncate } from "./format.js";
+import { safeIssueReference, UNTRUSTED_LINEAR_POLICY } from "./security-boundaries.js";
 import type { BindingRow } from "./store/rows.js";
 import type { Store } from "./store/store.js";
-import { issueDetailText, type IssueContext } from "./tools-format.js";
 
 /**
  * `#` mention providers, served **entirely from the local FTS mirror**.
@@ -81,29 +81,16 @@ export function registerMentionProviders(bb: BbPluginApi, deps: MentionDeps): vo
         };
       }
 
-      const context: IssueContext = {
-        states: new Map(
-          deps.store
-            .teams()
-            .flatMap((team) => deps.store.workflowStates(team.id))
-            .map((state) => [state.id, state]),
-        ),
-        members: new Map(deps.store.members().map((member) => [member.id, member])),
-        labels: new Map(deps.store.labels([]).map((label) => [label.id, label])),
-        priorityLabels: new Map(
-          deps.store.priorityValues().map((value) => [value.priority, value.label]),
-        ),
-        teams: new Map(deps.store.teams().map((team) => [team.id, team])),
-      };
-
+      const reference = safeIssueReference(issue.identifier, issue.id);
       return {
-        context: issueDetailText(issue, context, {
-          // The last few comments, not all of them: this text is attached to
-          // every send that mentions the issue, and an issue with two hundred
-          // replies would otherwise cost the model its whole context window
-          // for one mention.
-          comments: deps.store.comments(issue.id).slice(-5),
-        }),
+        // Mention resolution becomes prompt context automatically. Keep
+        // Linear-authored prose out of that privileged channel; the scoped
+        // tool can return it later as explicitly fetched external data.
+        context: [
+          `Linear issue ${reference} was mentioned.`,
+          UNTRUSTED_LINEAR_POLICY,
+          `Use linear_issue_get with ${reference} to read it in this project's scope.`,
+        ].join("\n\n"),
       };
     },
   });

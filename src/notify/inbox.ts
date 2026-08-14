@@ -13,6 +13,7 @@ import { classify, inboxKeyFor, type NotificationKind } from "./classify.js";
 
 export interface InboxRow {
   readonly key: string;
+  readonly workspaceId: string;
   readonly kind: NotificationKind;
   readonly issueId: string | null;
   readonly teamId: string | null;
@@ -29,11 +30,16 @@ export interface InboxRow {
   readonly linearReadAt: number | null;
 }
 
-export function toInboxRow(node: NotificationNode, now: number): InboxRow {
+export function toInboxRow(
+  node: NotificationNode,
+  now: number,
+  workspaceId: string,
+): InboxRow {
   const kind = classify(node);
   const createdAt = Date.parse(node.createdAt);
   return {
-    key: inboxKeyFor(kind, node),
+    key: `${workspaceId}:${inboxKeyFor(kind, node)}`,
+    workspaceId,
     kind,
     issueId: node.issueId ?? node.issue?.id ?? null,
     teamId: node.team?.id ?? null,
