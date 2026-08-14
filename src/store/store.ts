@@ -183,6 +183,8 @@ export interface Store {
   teams(): TeamRow[];
   team(id: string): TeamRow | null;
   teamByKey(key: string): TeamRow | null;
+  /** Every key match — two workspaces can both have an ENG. */
+  teamsByKey(key: string): TeamRow[];
   /** Walk the cached parent graph. Used by `includeSubTeams`, which exists
    *  only as an argument on `Team.issues` and *not* on the root `issues`
    *  query — so it is honoured by widening the team-id list at tick-build
@@ -216,6 +218,9 @@ export interface Store {
   putIssues(issues: readonly IssueInput[], at: number): void;
   issue(id: string): IssueRow | null;
   issueByIdentifier(identifier: string): IssueRow | null;
+  /** Every identifier match — for writers that must refuse a cross-workspace
+   *  collision rather than pick an arbitrary winner. */
+  issuesByIdentifier(identifier: string): IssueRow[];
   issuesByBranch(branchName: string): IssueRow[];
   queryIssues(query: IssueQuery): IssueRow[];
   countIssues(filter: IssueFilter): number;
@@ -479,6 +484,40 @@ export function createStore(db: Database): Store {
 
     forgetWorkspace(workspaceId) {
       db.transaction(() => {
+        // Everything the workspace's teams own goes with them. The schema has
+        // no foreign keys (deliberately — see migrations.ts), so this cascade
+        // is the only thing standing between "cleared the key" and a mirror
+        // that keeps serving the departed workspace's issues while orphaned
+        // binding rows make the sync loop poll its team ids over the primary
+        // key forever (the audited failure).
+        const teamIds = (
+          db.prepare(`SELECT id FROM team WHERE workspace_id = ?`).all(workspaceId) as {
+            id: string;
+          }[]
+        ).map((row) => row.id);
+        if (teamIds.length > 0) {
+          const marks = placeholders(teamIds.length);
+          db.prepare(
+            `DELETE FROM comment WHERE issue_id IN (SELECT id FROM issue WHERE team_id IN (${marks}))`,
+          ).run(...teamIds);
+          db.prepare(
+            `DELETE FROM relation WHERE issue_id IN (SELECT id FROM issue WHERE team_id IN (${marks}))`,
+          ).run(...teamIds);
+          db.prepare(
+            `DELETE FROM issue_previous_identifier
+              WHERE issue_id IN (SELECT id FROM issue WHERE team_id IN (${marks}))`,
+          ).run(...teamIds);
+          db.prepare(`DELETE FROM issue WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM binding WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM thread_link WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM inbox WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM cycle WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM team_member WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM git_automation_state WHERE team_id IN (${marks})`).run(
+            ...teamIds,
+          );
+          db.prepare(`DELETE FROM project_team WHERE team_id IN (${marks})`).run(...teamIds);
+        }
         db.prepare(`DELETE FROM team WHERE workspace_id = ?`).run(workspaceId);
         db.prepare(`DELETE FROM workspace WHERE id = ?`).run(workspaceId);
       })();
@@ -539,6 +578,17 @@ export function createStore(db: Database): Store {
         .prepare(`SELECT ${TEAM_COLUMNS} FROM team WHERE key = ? COLLATE NOCASE`)
         .get(key) as RawTeam | undefined;
       return row === undefined ? null : hydrateTeam(row);
+    },
+
+    teamsByKey(key) {
+      // Every match, for the callers that must DETECT a cross-workspace key
+      // collision rather than inherit whichever row the index returns first.
+      // Two workspaces can both have an ENG; "arbitrary winner" is how a
+      // binding lands on the wrong company's board.
+      const rows = db
+        .prepare(`SELECT ${TEAM_COLUMNS} FROM team WHERE key = ? COLLATE NOCASE`)
+        .all(key) as RawTeam[];
+      return rows.map(hydrateTeam);
     },
 
     descendantTeamIds(rootIds) {
@@ -757,6 +807,17 @@ export function createStore(db: Database): Store {
         )
         .get(identifier) as RawIssue | undefined;
       return previous === undefined ? null : toIssue(previous);
+    },
+
+    issuesByIdentifier(identifier) {
+      // Every match. ENG-42 can exist in two workspaces at once; a write
+      // that resolves through the singular form when both are in the mirror
+      // lands on whichever row the index favours. Callers about to WRITE use
+      // this and refuse on more than one.
+      const rows = db
+        .prepare(`SELECT ${ISSUE_COLUMNS} FROM issue WHERE identifier = ? COLLATE NOCASE`)
+        .all(identifier) as RawIssue[];
+      return rows.map(toIssue);
     },
 
     issuesByBranch(branchName) {

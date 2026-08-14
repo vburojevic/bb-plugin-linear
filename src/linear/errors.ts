@@ -65,7 +65,14 @@ export class LinearError extends Error {
     this.code = code;
     this.retryable = options.retryable ?? false;
     this.resetAt = options.resetAt ?? null;
-    this.errors = options.errors ?? [];
+    // The retained array gets the same treatment as the summary: a GraphQL
+    // validation error can echo the variables it rejected — including a
+    // webhook signing secret sent as one — and this enumerable property is
+    // exactly what a host that serializes error objects would carry out.
+    this.errors = (options.errors ?? []).map((entry) => ({
+      ...entry,
+      message: redact(entry.message),
+    }));
   }
 }
 

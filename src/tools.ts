@@ -178,14 +178,35 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
       return primary;
     }
 
-    const named = deps.store.teamByKey(teamKey);
-    if (named === null) {
+    // In-scope teams first: when the project's own binding names this key,
+    // that team is what the caller means, whatever other workspaces call
+    // theirs. Only then the workspace-wide lookup — with ambiguity REFUSED,
+    // because two workspaces can both have an ENG and an arbitrary winner is
+    // how a wrong-refusal (or a wrong write) happens.
+    const lowered = teamKey.toLowerCase();
+    const inScope = allowed.filter((team) => team.key.toLowerCase() === lowered);
+    if (inScope.length === 1) return inScope[0]!;
+
+    const matches = inScope.length > 1 ? inScope : deps.store.teamsByKey(teamKey);
+    if (matches.length === 0) {
       throw new Error(
         `No team with key ${teamKey} is visible to this API key. Visible teams: ${
           allowed.map((team) => team.key).join(", ") || "none"
         }.`,
       );
     }
+    if (matches.length > 1) {
+      const sides = matches
+        .map(
+          (team) =>
+            `${team.name} in ${deps.store.workspaceForTeam(team.id)?.name ?? "an unknown workspace"}`,
+        )
+        .join(" and ");
+      throw new Error(
+        `${teamKey} exists in more than one connected workspace — ${sides}. Say which team you mean by name, or ask the human to disambiguate.`,
+      );
+    }
+    const named = matches[0]!;
     const permitted = action === "write" ? current.writeTeamIds : current.readTeamIds;
     if (!permitted.includes(named.id)) {
       throw new Error(

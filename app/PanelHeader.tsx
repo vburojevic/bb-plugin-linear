@@ -161,7 +161,7 @@ export function LinearPanelHeader() {
               chrome.setSort(value as Sort);
               // Written through so the choice follows the account rather than
               // the browser. A failure here loses a preference, not a panel.
-              void rpc.call("setSort", { sort: value }).catch(() => undefined);
+              void rpc.call("setSort", { sort: value as Sort }).catch(() => undefined);
             }}
           >
             <DropdownMenuRadioItem value="updated">Last updated</DropdownMenuRadioItem>

@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { describeError } from "./linear/errors.js";
 import { selfTestPayload, signPayload } from "./webhook.js";
 
 /**
@@ -81,7 +82,42 @@ export function checkWebhookUrl(raw: string): UrlVerdict {
   if (parsed.username !== "" || parsed.password !== "") {
     return { ok: false, why: "A URL with credentials in it would be stored and sent in the clear. Put the secret in the path or drop it." };
   }
+  if (isPrivateHost(parsed.hostname)) {
+    // The self-test POSTs to this URL from the machine running bb, so a
+    // private/loopback/link-local target turns the webhook enable command into
+    // an internal-network probe. Linear itself only delivers to public
+    // endpoints, so nothing legitimate is lost by refusing these — and the
+    // cloud metadata endpoint (169.254.169.254) is exactly the address this
+    // blocks.
+    return {
+      ok: false,
+      why: `${parsed.hostname} is a private or loopback address; Linear only delivers to public endpoints, so a webhook there would never receive anything.`,
+    };
+  }
   return { ok: true, url: parsed.toString() };
+}
+
+/**
+ * Private, loopback, link-local and unique-local ranges — the addresses a
+ * webhook target must never be, because Linear cannot reach them and a
+ * self-test to them is an SSRF primitive. Hostnames are lower-cased; a bare
+ * `localhost` and the common private forms are covered without a DNS lookup
+ * (the plugin does not resolve names — a public name that resolves privately
+ * is out of scope for a local, write-gated, user-typed command).
+ */
+export function isPrivateHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80"))
+    return true;
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4 === null) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  if (a === 10 || a === 127 || a === 0) return true;
+  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
 }
 
 /** 32 bytes, hex. Generated locally and *supplied* to Linear rather than
@@ -147,7 +183,7 @@ export async function runSelfTest(options: SelfTestOptions): Promise<SelfTestRes
   } catch (error) {
     return {
       ok: false,
-      why: `Nothing answered at that URL (${error instanceof Error ? error.message : "connection failed"}). Linear would get the same result and disable the webhook after three tries.`,
+      why: `Nothing answered at that URL (${describeError(error)}). Linear would get the same result and disable the webhook after three tries.`,
     };
   }
 

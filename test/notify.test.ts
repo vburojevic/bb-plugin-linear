@@ -86,6 +86,7 @@ describe("shouldSend", () => {
       viewerId: "u_me",
       installWatermark: Date.parse("2026-08-01T00:00:00.000Z"),
       boundTeamIds: new Set(["team_eng"]),
+      workspaceHasBoundTeam: true,
       isEcho: () => false,
       settings: { assigned: true, comments: true, blocked: true },
       ...overrides,
@@ -140,6 +141,24 @@ describe("shouldSend", () => {
 
   it("suppresses a team no bb project binds", () => {
     expect(shouldSend(input({ boundTeamIds: new Set(["team_other"]) })).send).toBe(false);
+  });
+
+  it("suppresses a team-less notification from a workspace with no bound team", () => {
+    // The company key you added but bound nothing in: its project/document
+    // notifications carry no team, so the team check cannot catch them — the
+    // workspace-level guard does.
+    const teamless = node({ team: undefined, category: "postsAndUpdates" });
+    expect(shouldSend(input({ node: teamless, workspaceHasBoundTeam: false })).send).toBe(false);
+  });
+
+  it("still delivers a team-less assignment in a workspace you actually use", () => {
+    const teamless = node({ team: undefined });
+    expect(shouldSend(input({ node: teamless, workspaceHasBoundTeam: true })).send).toBe(true);
+  });
+
+  it("never pushes the catch-all 'other' kind, even in a bound workspace", () => {
+    // "other" lands in the durable inbox but is too low-signal to buzz a phone.
+    expect(shouldSend(input({ node: node({ category: "statusChanges" }) })).send).toBe(false);
   });
 
   it("honours each per-kind setting independently", () => {

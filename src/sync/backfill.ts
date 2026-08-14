@@ -148,7 +148,7 @@ export async function backfillTeams(
   } catch (error) {
     // Breadth is decoration on top of the issue list. Failing to read it must
     // not fail the backfill that fills the panel.
-    deps.log?.("debug", `Couldn't read projects and cycles: ${String(error)}`);
+    deps.log?.("debug", `Couldn't read projects and cycles: ${describeError(error)}`);
   }
 
   let after: string | null = null;

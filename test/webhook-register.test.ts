@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   checkWebhookUrl,
   describeDemotion,
+  isPrivateHost,
   newSigningSecret,
   planRegistration,
   runSelfTest,
@@ -253,3 +254,37 @@ describe("planRegistration", () => {
     expect(plan.create).toEqual([]);
   });
 });
+
+describe("isPrivateHost — the self-test SSRF guard", () => {
+  it("blocks loopback, private, and link-local targets", () => {
+    for (const host of [
+      "localhost", "app.localhost", "127.0.0.1", "0.0.0.0", "10.1.2.3",
+      "172.16.0.1", "172.31.255.255", "192.168.1.1", "169.254.169.254", // cloud metadata
+      "::1", "fd00::1", "fe80::1",
+    ]) {
+      expect(isPrivateHost(host), host).toBe(true);
+    }
+  });
+
+  it("allows genuine public endpoints", () => {
+    for (const host of ["example.com", "hooks.acme.io", "8.8.8.8", "172.32.0.1", "192.169.0.1"]) {
+      expect(isPrivateHost(host), host).toBe(false);
+    }
+  });
+});
+
+describe("checkWebhookUrl refuses private targets", () => {
+  it("rejects a loopback URL before any request is made", () => {
+    const verdict = checkWebhookUrl("https://127.0.0.1/hook");
+    expect(verdict.ok).toBe(false);
+  });
+
+  it("rejects the cloud metadata address", () => {
+    const verdict = checkWebhookUrl("https://169.254.169.254/latest/meta-data/");
+    expect(verdict.ok).toBe(false);
+  });
+
+  it("still accepts a normal public https URL", () => {
+    expect(checkWebhookUrl("https://hooks.example.com/linear").ok).toBe(true);
+  });
+})

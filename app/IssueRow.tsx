@@ -9,6 +9,7 @@ import {
 import { Icon } from "@/components/ui/icon";
 import type { IssueRowView } from "../src/contract.js";
 import { priorityToneClass, toneClass } from "../src/select/tone.js";
+import { safeHref } from "./href.js";
 import { BbFactGlyph, describeBbFact, StateGlyph } from "./StateGlyph.js";
 
 export interface RowActions {
@@ -61,9 +62,9 @@ export const IssueRow = memo(function IssueRow({
         <ContextMenuItem onSelect={() => actions.copyBranch(row.id)}>
           Copy branch name
         </ContextMenuItem>
-        {row.url !== null ? (
+        {safeHref(row.url) !== undefined ? (
           <ContextMenuItem asChild>
-            <a href={row.url} target="_blank" rel="noreferrer">
+            <a href={safeHref(row.url)} target="_blank" rel="noreferrer">
               Open in Linear
             </a>
           </ContextMenuItem>

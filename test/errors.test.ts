@@ -113,3 +113,28 @@ describe("mutationFailed", () => {
     expect(mutationFailed("nope").retryable).toBe(false);
   });
 });
+
+describe("the retained GraphQL error array", () => {
+  it("is redacted at construction, like the summary", () => {
+    // A GraphQL validation error can echo the variables it rejected —
+    // including a webhook signing secret sent as one — and `errors` is an
+    // enumerable property a host could serialize into an rpc envelope.
+    rememberSecret("lin_api_thisIsTheLiveKey00");
+    const error = queryFailed(
+      [
+        {
+          message: 'Variable "$input" got invalid value { secret: "lin_api_thisIsTheLiveKey00" }',
+          extensions: { code: "BAD_USER_INPUT" },
+        },
+        { message: "authorization: lin_api_thisIsTheLiveKey00" },
+      ],
+      200,
+    );
+    for (const entry of error.errors) {
+      expect(entry.message).not.toContain("thisIsTheLiveKey00");
+      expect(entry.message).toContain("[redacted]");
+    }
+    // The extensions object is preserved for the code switch that reads it.
+    expect(error.errors[0]!.extensions?.["code"]).toBe("BAD_USER_INPUT");
+  });
+});

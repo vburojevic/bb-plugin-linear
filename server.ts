@@ -23,7 +23,13 @@ import {
   type CredentialSlot,
   type SlotCredential,
 } from "./src/credentials.js";
-import { describeError, forgetSecrets, isLinearError, redact } from "./src/linear/errors.js";
+import {
+  describeError,
+  forgetSecrets,
+  isLinearError,
+  redact,
+  rememberSecret,
+} from "./src/linear/errors.js";
 import {
   createLinearClient,
   unwrapMutation,
@@ -849,14 +855,15 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           : {}),
       });
 
-      // Not a warning in either direction: off is the safe default working as
-      // designed, on is a choice somebody made. The doctor's job here is only
-      // to make the state impossible to be surprised by.
+      // Not a warning in either direction: writes-on is the shipped default,
+      // writes-off is the read-only choice. The doctor's job here is only to
+      // make the state impossible to be surprised by — the one line someone
+      // adding a company key should read before pasting it.
       checks.push({
         label: "Writes",
         status: "ok",
         detail: writesAllowed(values)
-          ? "allowed — the plugin may change issues, comments and webhooks"
+          ? "ALLOWED — the plugin may change issues, comments and webhooks (turn off for read-only)"
           : "off — every change to Linear is refused; reads are unaffected",
         ...(writesAllowed(values)
           ? {}
@@ -1317,9 +1324,22 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // it were optional; it is not.
       "/webhook",
       async (context) => {
+        // A cheap upper bound before buffering the body of an UNAUTHENTICATED
+        // route into memory. Linear's deliveries are a few KB; a declared
+        // Content-Length past 1 MB is not a real delivery, so it is refused
+        // without reading. (The stream itself could still lie about its
+        // length, so this is a first line, not the whole defence — the host's
+        // own body limit is the backstop.)
+        const declaredLength = Number(context.req.header("content-length") ?? "0");
+        if (Number.isFinite(declaredLength) && declaredLength > 1_048_576) {
+          return new Response("too large", { status: 413 });
+        }
         // The RAW body text. Never parse-then-restringify — the signature is
         // over the bytes Linear sent, and a round trip reorders keys.
         const raw = await context.req.text();
+        if (raw.length > 1_048_576) {
+          return new Response("too large", { status: 413 });
+        }
         const verified = verifyWebhook({
           raw,
           signature: context.req.header("linear-signature") ?? null,
@@ -1410,6 +1430,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       const secret = store.localSecret(WEBHOOK_SECRET_KEY) ?? "";
       const signing = secret === "" ? newSigningSecret() : secret;
       store.putLocalSecret(WEBHOOK_SECRET_KEY, signing);
+      // Registered with the redactor so that if Linear ever echoes the
+      // mutation input back in an error (it sends the secret as a GraphQL
+      // variable), the value is scrubbed from that error before it reaches the
+      // CLI output or a log line — the one path the audit found could carry it.
+      rememberSecret(signing);
 
       const nonce = newNonce();
       const selfTest = await runSelfTest({
@@ -1590,10 +1615,22 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       const install = await kv.readOptional(KV.installWatermark, installWatermarkSchema);
       const installWatermark = install?.at ?? now();
 
-      // A brand-new install starts its notification cursor at *now*, so a
-      // stranger does not receive three hundred notifications about last
-      // quarter on their first afternoon.
-      const cursor = since?.at ?? installWatermark;
+      // A slot polled for the first time starts its inbox cursor at *now* —
+      // never at the global install watermark, which belongs to whichever key
+      // connected first and may be months old. This is the fix for a company
+      // key added to an existing install: without it, the very first poll of
+      // the new workspace pulls its entire recent inbox backlog (up to a page)
+      // into bb, unlabelled, and (past 50) re-pulls the same page every tick
+      // because the cursor can never advance past a full page. Persisted
+      // immediately, before the fetch, so the floor holds even if this tick
+      // dies.
+      let cursor: number;
+      if (since !== undefined) {
+        cursor = since.at;
+      } else {
+        cursor = now();
+        await kv.write(watermarkKey, { v: 1, at: cursor });
+      }
 
       const result = await clientForSlot(slot).notifications(new Date(cursor).toISOString(), {
         initiator: "background",
@@ -1602,6 +1639,13 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
 
       const viewer = store.viewer();
       const boundTeamIds = new Set(store.boundTeamIds());
+      // Does the workspace this slot reaches have any bound team? Used to
+      // suppress pushes from a connected-but-unbound workspace's team-less
+      // notifications. `workspaceForTeam` joins a team to its slot's
+      // workspace, so a bound team whose workspace is this slot answers yes.
+      const workspaceHasBoundTeam = [...boundTeamIds].some(
+        (teamId) => store.workspaceForTeam(teamId)?.slot === slot,
+      );
       const rows = result.notifications.nodes.map((node) => toInboxRow(node, now()));
       store.putInbox(rows);
 
@@ -1613,6 +1657,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           viewerId: viewer?.id ?? null,
           installWatermark,
           boundTeamIds,
+          workspaceHasBoundTeam,
           isEcho: (entityId, updatedAt) => store.isEcho(entityId, updatedAt),
           settings: {
             assigned: values.notifyAssigned,
@@ -2054,6 +2099,43 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
 
     /* ── Registrations ───────────────────────────────────────────────────── */
 
+    /**
+     * The panel's write rpcs carry no project context, so scope is checked
+     * against the union of every binding's write set: the issue's team must be
+     * write-bound by *some* bb project here. The CLI and the agent tools do
+     * their own per-project checks; this is the equivalent gate for the panel
+     * surface, which the audit found had none. Cross-workspace identifier
+     * ambiguity is refused rather than resolved to an arbitrary row.
+     */
+    function panelWritableIssue(
+      idOrIdentifier: string,
+    ): { issue: NonNullable<ReturnType<Store["issue"]>> } | { message: string } {
+      let issue = store.issue(idOrIdentifier);
+      if (issue === null) {
+        const matches = store.issuesByIdentifier(idOrIdentifier);
+        if (matches.length > 1) {
+          return {
+            message: `${idOrIdentifier} exists in more than one connected workspace. Nothing was changed; open it from its own row instead.`,
+          };
+        }
+        issue = matches[0] ?? null;
+      }
+      if (issue === null) return { message: `No issue called ${idOrIdentifier}.` };
+
+      const writable = new Set(
+        bindingSnapshot.flatMap((row) =>
+          scopeFor(row.projectId, bindingSnapshot).writeTeamIds,
+        ),
+      );
+      if (!writable.has(issue.teamId)) {
+        const team = store.team(issue.teamId);
+        return {
+          message: `${issue.identifier} is on ${team?.name ?? "a team"} (${team?.key ?? "?"}), which no bb project here is bound to with write access. Bind it, or work from the workspace that owns it.`,
+        };
+      }
+      return { issue };
+    }
+
     bb.rpc.register(serverRpcContract, {
       async status() {
         const states = await slotStates(false);
@@ -2134,10 +2216,9 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       },
 
       async updateIssue(params) {
-        const issue = store.issue(params.id) ?? store.issueByIdentifier(params.id);
-        if (issue === null) {
-          return { ok: false, message: `No issue called ${params.id}.` };
-        }
+        const guarded = panelWritableIssue(params.id);
+        if ("message" in guarded) return { ok: false, message: guarded.message };
+        const issue = guarded.issue;
         try {
           await updateIssue(
             mutations,
@@ -2244,8 +2325,14 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       },
 
       async comment({ issueId, body }) {
+        const guarded = panelWritableIssue(issueId);
+        if ("message" in guarded) return { ok: false, message: guarded.message };
         try {
-          await postComment(mutations, { issueId, body, clientId: clientId() });
+          await postComment(mutations, {
+            issueId: guarded.issue.id,
+            body,
+            clientId: clientId(),
+          });
           return { ok: true, message: null };
         } catch (error) {
           return { ok: false, message: describeError(error) };
@@ -2422,8 +2509,10 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       },
 
       async archiveIssue({ id }) {
+        const guarded = panelWritableIssue(id);
+        if ("message" in guarded) return { ok: false, message: guarded.message };
         try {
-          await archiveIssue(mutations, id);
+          await archiveIssue(mutations, guarded.issue.id);
           return { ok: true, message: null };
         } catch (error) {
           return { ok: false, message: describeError(error) };
@@ -2532,8 +2621,23 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       },
       bind: async ({ teamKey, projectId, role }) => {
         if (store.teams().length === 0) await discoverOnce();
-        const team = store.teamByKey(teamKey);
-        if (team === null) return { ok: false, message: `No team with key ${teamKey}.` };
+        const matches = store.teamsByKey(teamKey);
+        if (matches.length === 0) return { ok: false, message: `No team with key ${teamKey}.` };
+        if (matches.length > 1) {
+          // Two workspaces, one key. Silently binding whichever row wins is
+          // how a company board gets bound under a personal team's name.
+          const sides = matches
+            .map(
+              (entry) =>
+                `${entry.name} in ${store.workspaceForTeam(entry.id)?.name ?? "an unknown workspace"}`,
+            )
+            .join(" and ");
+          return {
+            ok: false,
+            message: `${teamKey} exists in more than one connected workspace — ${sides}. Bind from this plugin's settings, where teams are labelled by workspace.`,
+          };
+        }
+        const team = matches[0]!;
         const resolved = projectId ?? (await defaultProjectId());
         if (resolved === null) {
           return {
@@ -2850,10 +2954,37 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           };
         }
 
-        const target =
-          team === undefined
-            ? (current.primaryTeamId === null ? null : store.team(current.primaryTeamId))
-            : store.teamByKey(team);
+        // In-scope first, ambiguity refused — the same collision rule as
+        // bind: a key that exists in two workspaces must never resolve to
+        // whichever row the index favours when a WRITE hangs on the answer.
+        let target: ReturnType<Store["team"]> = null;
+        if (team === undefined) {
+          target = current.primaryTeamId === null ? null : store.team(current.primaryTeamId);
+        } else {
+          const lowered = team.toLowerCase();
+          const inScope = current.writeTeamIds
+            .map((id) => store.team(id))
+            .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+            .filter((entry) => entry.key.toLowerCase() === lowered);
+          if (inScope.length === 1) {
+            target = inScope[0]!;
+          } else {
+            const matches = inScope.length > 1 ? inScope : store.teamsByKey(team);
+            if (matches.length > 1) {
+              const sides = matches
+                .map(
+                  (entry) =>
+                    `${entry.name} in ${store.workspaceForTeam(entry.id)?.name ?? "an unknown workspace"}`,
+                )
+                .join(" and ");
+              return {
+                ok: false,
+                message: `${team} exists in more than one connected workspace — ${sides}. Nothing was created.`,
+              };
+            }
+            target = matches[0] ?? null;
+          }
+        }
         if (target === null || !current.writeTeamIds.includes(target.id)) {
           return {
             ok: false,
@@ -3243,7 +3374,25 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       identifier: string,
       projectId: string | undefined,
     ): Promise<{ issue: NonNullable<ReturnType<Store["issue"]>>; team: { name: string } } | { message: string }> {
-      let issue = store.issue(identifier) ?? store.issueByIdentifier(identifier);
+      let issue = store.issue(identifier);
+      if (issue === null) {
+        // Every identifier match, because ENG-42 can exist in two connected
+        // workspaces at once — and a WRITE that inherits whichever row the
+        // index favours lands on the other company's board.
+        const matches = store.issuesByIdentifier(identifier);
+        if (matches.length > 1) {
+          const sides = matches
+            .map(
+              (row) =>
+                `"${row.title}" in ${store.workspaceForTeam(row.teamId)?.name ?? "an unknown workspace"}`,
+            )
+            .join(" and ");
+          return {
+            message: `${identifier} exists in more than one connected workspace — ${sides}. Nothing was changed; use the issue URL or id instead of the identifier.`,
+          };
+        }
+        issue = matches[0] ?? null;
+      }
       if (issue === null) {
         issue = await lifetime.runAsync("issue", () => refreshIssue(identifier), null);
       }

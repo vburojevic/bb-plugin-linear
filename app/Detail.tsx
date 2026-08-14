@@ -15,6 +15,7 @@ import { formatDateTime } from "../src/format.js";
 import { toneClass } from "../src/select/tone.js";
 import { StateGlyph } from "./StateGlyph.js";
 import { PropertyEditors, useEditorOptions } from "./Editors.js";
+import { safeHref } from "./href.js";
 import { useAsync, useLinearRpc } from "./rpc.js";
 
 /**
@@ -163,9 +164,9 @@ function IssueBody({
           )}
 
           <div className="ml-auto flex items-center gap-1">
-              {detail.url !== null ? (
+              {safeHref(detail.url) !== undefined ? (
                 <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" asChild>
-                  <a href={detail.url} target="_blank" rel="noreferrer">
+                  <a href={safeHref(detail.url)} target="_blank" rel="noreferrer">
                     Open in Linear
                     <Icon name="ExternalLink" className="size-3" aria-hidden />
                   </a>

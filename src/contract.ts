@@ -896,7 +896,9 @@ export const rpcContract = defineRpcContract({
   },
 
   setSort: {
-    input: z.object({ sort: z.string().min(1) }).strict(),
+    // The enum at write time too, not just at panel-read time — the kv row
+    // should never hold a value the panel would refuse.
+    input: z.object({ sort: sortSchema }).strict(),
     output: z.object({ ok: z.boolean() }),
   },
 

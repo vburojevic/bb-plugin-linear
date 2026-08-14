@@ -51,6 +51,13 @@ export interface SuppressionInput {
   /** Set on the first successful connect and never again. */
   readonly installWatermark: number;
   readonly boundTeamIds: ReadonlySet<string>;
+  /** Whether the WORKSPACE this notification came from has any bound team at
+   *  all. A team-less notification (project update, document mention) cannot
+   *  be scope-checked against `boundTeamIds`, so a connected-but-unbound
+   *  workspace would otherwise push its events to a phone. False here suppresses
+   *  the push for exactly that case — the company key you added but bound
+   *  nothing in stays silent. */
+  readonly workspaceHasBoundTeam: boolean;
   /** Whether `(entityId, updatedAt)` is in the echo table — this plugin's own
    *  write coming back. */
   readonly isEcho: (entityId: string, updatedAt: number) => boolean;
@@ -111,11 +118,26 @@ export function shouldSend(input: SuppressionInput): Suppression {
 
   // Scope is the binding here too. A notification about a team no bb project
   // binds is a notification about work this bb does not track.
-  if (node.team !== undefined && !input.boundTeamIds.has(node.team.id)) {
-    return { send: false, because: "team not bound" };
+  if (node.team !== undefined) {
+    if (!input.boundTeamIds.has(node.team.id)) {
+      return { send: false, because: "team not bound" };
+    }
+  } else if (!input.workspaceHasBoundTeam) {
+    // No team to check, and nothing in this workspace is bound — a
+    // team-less notification from a connected-but-unbound workspace (a
+    // company key you added but never bound a team in) must not reach a
+    // phone.
+    return { send: false, because: "no team in this workspace is bound" };
   }
 
   const kind = classify(node);
+  // "other" is the catch-all — project status changes, initiative updates,
+  // things with no explicit opt-in. It lands in the durable inbox but never
+  // pushes; pushing an un-opted-in catch-all is how a phone learns to ignore
+  // this plugin.
+  if (kind === "other") {
+    return { send: false, because: "not a kind that pushes" };
+  }
   if (kind === "assigned" && !input.settings.assigned) {
     return { send: false, because: "assignment notifications are off" };
   }
