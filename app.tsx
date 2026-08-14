@@ -55,7 +55,7 @@ function ConnectionCard() {
           status.accounts.map((account) => (
             <p key={account.slot}>
               {account.error !== null
-                ? `Slot ${account.slot}: ${account.error}`
+                ? `${account.label}: ${account.error}`
                 : `Connected as ${account.displayName} in ${account.orgName} (${account.orgUrlKey})`}
             </p>
           ))
