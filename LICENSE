@@ -1,0 +1,37 @@
+MIT License
+
+Copyright (c) 2026 bb-plugin-linear contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Trademark notice
+
+Linear is a trademark of Linear Orbit, Inc. This project is an independent,
+unofficial integration. It is not affiliated with, endorsed by, or sponsored
+by Linear Orbit, Inc.
+
+The MIT licence above covers this project's source code. It does not grant any
+right to use the Linear name or marks. This is also why the plugin ships its
+own icon — a rounded card with a status line — rather than Linear's own angled
+mark: redistributing a trademarked logo under MIT is a licensing problem the
+artwork does not need to have, and bb renders a plugin's icon as a CSS mask
+driven by `currentColor` anyway, so a logo would arrive as a silhouette of
+itself.
