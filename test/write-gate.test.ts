@@ -291,15 +291,18 @@ describe("transport: the gate fails closed", () => {
 /* 3. The wiring is pinned                                                    */
 /* ────────────────────────────────────────────────────────────────────────── */
 
-describe("the default is off", () => {
-  it("ships allowWrites as a boolean defaulting to false", () => {
+describe("the switch itself", () => {
+  it("ships allowWrites as a boolean defaulting to on", () => {
+    // Revised at the owner's direction from opt-in consent to a one-flip
+    // read-only switch: writes work out of the box, and turning the switch
+    // off puts every guarantee in this file into effect.
     expect(SETTING_DESCRIPTORS.allowWrites.type).toBe("boolean");
-    expect(SETTING_DESCRIPTORS.allowWrites.default).toBe(false);
+    expect(SETTING_DESCRIPTORS.allowWrites.default).toBe(true);
   });
 
   it("explains itself in the settings form", () => {
     expect(SETTING_DESCRIPTORS.allowWrites.label).toBe("Allow changes to Linear");
-    expect(SETTING_DESCRIPTORS.allowWrites.description).toContain("Off by default");
+    expect(SETTING_DESCRIPTORS.allowWrites.description).toContain("read-only");
   });
 });
 

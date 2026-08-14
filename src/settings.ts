@@ -67,10 +67,10 @@ export const SETTING_DESCRIPTORS = {
   },
 
   /*
-   * The master consent switch, and deliberately the only one that matters —
+   * The master write switch, and deliberately the only one that matters —
    * declared right after the keys, because the host renders descriptors in
-   * declaration order and a consent switch buried under webhook and cadence
-   * tuning is a consent switch nobody finds.
+   * declaration order and a kill switch buried under webhook and cadence
+   * tuning is a kill switch nobody finds.
    *
    * Off means the plugin cannot change anything in Linear — not an issue, not
    * a comment, not a webhook registration — no matter what any other setting,
@@ -81,9 +81,9 @@ export const SETTING_DESCRIPTORS = {
   allowWrites: {
     type: "boolean",
     label: "Allow changes to Linear",
-    default: false,
+    default: true,
     description:
-      "Off by default: the plugin reads freely (issues, inbox, search all work) but refuses every change to Linear — issue edits, comments, new issues, attachments, webhook registration — until you turn this on. The refusal always names this switch. Agent write access (below) only applies once this is on.",
+      "Turn this off to make the plugin read-only. It keeps reading Linear freely — issues, inbox, search all work — but refuses every change: issue edits, comments, new issues, attachments, webhook registration. Each refusal names this switch. Agent write access (below) applies only while this is on.",
   },
 
   oauthClientId: {

@@ -1,11 +1,12 @@
 /**
- * Write consent: the plugin changes nothing in Linear until a human says so.
+ * The write switch: one flip makes the plugin read-only.
  *
- * `allowWrites` defaults to **false**. Until it is turned on, every GraphQL
- * mutation — issue edits, comments, creations, attachments, archives,
- * relations, webhook registration, all of it — is refused with one sentence
- * that names the remedy. Reads are untouched: the mirror fills, the panel
- * renders, search answers.
+ * While `allowWrites` is off, every GraphQL mutation — issue edits, comments,
+ * creations, attachments, archives, relations, webhook registration, all of
+ * it — is refused with one sentence that names the remedy. Reads are
+ * untouched: the mirror fills, the panel renders, search answers. (It ships
+ * on; turning it off is the owner's one-flip way to let the plugin observe a
+ * workspace it must not touch.)
  *
  * The guarantee is structural, not disciplinary. Every mutation the plugin
  * can ever send is a document in `src/linear/documents.ts` with

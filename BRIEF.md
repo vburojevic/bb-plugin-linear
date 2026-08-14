@@ -208,10 +208,14 @@ dense rows, a filter bar, saved views per team, projects and cycles pages,
 live search. A sidebar-width board is a cramped board; Linear's list idiom
 is its primary view anyway. Revisit boards only if bb grows a wide surface.
 
-**D12 — Writes need consent, enforced structurally.** `allowWrites` defaults
-to false; until a human turns it on, every GraphQL mutation — issue edits,
-comments, creations, attachments, archives, relations, webhook registration —
-is refused with one sentence naming the remedy. The enforcement point is the
+**D12 — One switch makes the plugin read-only, enforced structurally.**
+While `allowWrites` is off, every GraphQL mutation — issue edits, comments,
+creations, attachments, archives, relations, webhook registration — is
+refused with one sentence naming the remedy. (Shipped default-off for one
+day, then revised at the owner's direction to default-ON: a kill switch
+rather than opt-in consent, because a fresh install that refuses its own
+first `bb linear create` reads as broken, and the flip to read-only is one
+toggle away. Everything structural below is unchanged either way.) The enforcement point is the
 transport (every mutation is a registry document, every document leaves
 through one transport, the transport consults the gate), so a tool, CLI
 command, rpc handler or automation added later is gated the day it is written

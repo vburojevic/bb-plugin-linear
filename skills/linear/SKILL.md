@@ -100,12 +100,12 @@ on an HTTP 200 — but say what you did rather than assuming the human saw it.
 
 ## If every write is being refused
 
-The plugin has a master consent switch, off by default: until the human turns
-on "Allow changes to Linear", every mutation is refused with a sentence naming
-the switch. When writes are off you will not be offered writing tools at all —
-but if a refusal quoting that switch ever reaches you, relay it verbatim and
-stop. Turning it on is the human's decision, not yours; never suggest working
-around it.
+The plugin has a master write switch: when the human has turned off "Allow
+changes to Linear", every mutation is refused with a sentence naming the
+switch — the plugin is deliberately read-only on this install. When writes
+are off you will not be offered writing tools at all, but if a refusal
+quoting that switch ever reaches you, relay it verbatim and stop. Turning it
+back on is the human's decision, not yours; never suggest working around it.
 
 ## What the plugin will not let you do
 
