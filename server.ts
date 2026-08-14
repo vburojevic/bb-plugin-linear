@@ -51,7 +51,9 @@ import { estimateLabel, estimateScale, selectDetail } from "./src/select/detail.
 import { initialsOf } from "./src/select/panel.js";
 import { toneForStateType } from "./src/select/tone.js";
 import { issueDetailText } from "./src/tools-format.js";
-import { applyIssueDetail } from "./src/sync/apply.js";
+import { registerTools } from "./src/tools.js";
+import { applyIssueDetail, toIssueInput } from "./src/sync/apply.js";
+import type { IssueNode } from "./src/linear/types.js";
 import { resolveBinding, type LadderDeps } from "./src/binding.js";
 import { crossTeamRefusal, scopeFor } from "./src/bindings.js";
 import {
@@ -3061,8 +3063,104 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * per thread whether any of them are offered, and an unbound project gets
      * none of them plus one sentence saying why.
      */
-    /* Agent tools (M6) and mention providers (M7) were cut with their
-     * surfaces; the full-parity toolset returns redesigned in M6. */
+    registerTools(bb, {
+      store,
+      bindings: () => bindingSnapshot,
+      agentWrites: () => readAgentWrites(initialSettings.agentWrites),
+      mutations,
+      refreshIssue,
+      // `skills/linear/SKILL.md`'s frontmatter name. An **unknown** name
+      // rejects this plugin's entire selection for the resolution, so this is
+      // the one place it is written and it has to match the file.
+      skills: () => ["linear"],
+      clientForTeam,
+
+      /**
+       * Linear's own search, when the mirror cannot answer.
+       *
+       * Returns null rather than throwing: the caller has a perfectly good
+       * local answer to fall back on, and turning a rate limit into a tool
+       * error would tell the agent the search failed rather than that this
+       * one escalation did.
+       */
+      searchRemote: async (query, teamIds, signal) => {
+        try {
+          // Grouped by workspace for the same reason every other read is: the
+          // filter only resolves for the key that issued it.
+          const found: IssueRow[] = [];
+          for (const [slot, group] of teamsBySlot(teamIds)) {
+            const result = await clientForSlot(slot).searchIssues(query, group, {
+              initiator: "user",
+              ...(signal ? { signal } : {}),
+            });
+            const rows = result.searchIssues.nodes.map(toIssueInput);
+            store.putIssues(rows, now());
+            for (const row of rows) {
+              const stored = store.issue(row.id);
+              if (stored !== null) found.push(stored);
+            }
+          }
+          publish("linear:data");
+          return found;
+        } catch (error) {
+          lifetime.log("debug", `Remote search failed: ${describeError(error)}`);
+          return null;
+        }
+      },
+
+      runView: async (viewId, signal) => {
+        try {
+          // The view runs at Linear. `filterData` is a JSONObject in Linear's
+          // internal dialect and reimplementing it is not an option.
+          const result = await client.customViewIssues(viewId, null, {
+            initiator: "user",
+            ...(signal ? { signal } : {}),
+          });
+          const rows = (result.customView.issues.nodes as IssueNode[]).map(toIssueInput);
+          store.putIssues(rows, now());
+          publish("linear:data");
+          const issues = rows
+            .map((row) => store.issue(row.id))
+            .filter((row): row is IssueRow => row !== null);
+          return { name: result.customView.name, issues };
+        } catch (error) {
+          lifetime.log("debug", `Saved view ${viewId} could not be read: ${describeError(error)}`);
+          return null;
+        }
+      },
+
+      startThread: async () => ({
+        ok: false,
+        message: "Starting a thread from an issue arrives with M8.",
+        note: null,
+      }),
+
+      /**
+       * The thread's own binding, as the same sentence every turn's
+       * instructions carry — one text, two delivery paths, so the tool and
+       * the ambient context can never disagree.
+       */
+      threadIssue: (threadId) => {
+        const cached = instructionCache.get(threadId);
+        if (cached !== undefined) return cached;
+        const suggestion = suggestions.get(threadId);
+        if (suggestion !== undefined) {
+          return `This thread is not bound to a Linear issue. Best guess by title: ${suggestion.identifier} — "${suggestion.title}". Bind it with linear_thread_bind if that is right.`;
+        }
+        return "This thread is not bound to a Linear issue. Bind one with linear_thread_bind, or work by identifier with the other linear_* tools.";
+      },
+
+      bindThread: async (threadId, idOrIdentifier) => {
+        const thread = await lifetime.runAsync(
+          "thread",
+          () => bb.sdk.threads.get({ threadId }),
+          null,
+        );
+        return bindManually(threadId, idOrIdentifier, thread?.projectId ?? null);
+      },
+
+      now,
+    });
 
     bb.cli.register({
       name: "linear",
