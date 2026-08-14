@@ -10,7 +10,10 @@ import {
 } from "@/components/ui/card";
 import { HeaderChip } from "./app/HeaderChip.js";
 import { IssuePanel } from "./app/IssuePanel.js";
+import { LinearPanel } from "./app/Panel.js";
+import { LinearPanelHeader } from "./app/PanelHeader.js";
 import { useAsync, useLinearRpc } from "./app/rpc.js";
+import { identifiersInText } from "./src/select/identifiers.js";
 
 function ConnectionCard() {
   const rpc = useLinearRpc();
@@ -49,6 +52,20 @@ function ConnectionCard() {
 }
 
 export default definePluginApp((app) => {
+  /*
+   * The front door: the list-first Linear browser at sidebar width. The host
+   * draws the title bar (plugin icon + title) and mounts `headerContent` as
+   * the actions on the right; the component owns a full-bleed body.
+   */
+  app.slots.navPanel({
+    id: "linear",
+    title: "Linear",
+    icon: "Layers",
+    path: "linear",
+    component: LinearPanel,
+    headerContent: LinearPanelHeader,
+  });
+
   app.slots.homepageSection({
     id: "linear-connection",
     title: "Linear",
@@ -65,5 +82,45 @@ export default definePluginApp((app) => {
     id: "issue",
     title: "Linear issue",
     component: IssuePanel,
+  });
+
+  /*
+   * Open the issues a message names, in the side panel — selection first,
+   * because highlighting one identifier in a message that names six is an
+   * unambiguous statement about which one you meant. The parser is loose
+   * ("UTF-8" matches too); the panel resolves what it is given and shows a
+   * plain miss for anything that is not a real issue, so a false positive
+   * costs one glance. Several identifiers open several tabs: the host
+   * de-duplicates tabs by params, so the tabs are the list.
+   */
+  app.slots.messageAction({
+    id: "open-issue",
+    title: "Open in Linear",
+    icon: "Layers",
+    run: ({ threadId: _threadId, message, selectedText, openPanel }) => {
+      const source =
+        selectedText !== undefined && selectedText !== "" ? selectedText : message.text;
+      const { identifiers } = identifiersInText(source);
+      if (identifiers.length === 0) {
+        // No identifier named is not a failure: fall back to this thread's
+        // own issue, which is what "Linear" means on such a message.
+        openPanel({ actionId: "issue" });
+        return;
+      }
+      for (const identifier of identifiers) {
+        openPanel({
+          actionId: "issue",
+          title: identifier,
+          params: { issueId: identifier },
+        });
+      }
+    },
+  });
+
+  app.slots.sidebarFooterAction({
+    id: "linear-settings",
+    title: "Linear settings",
+    icon: "Layers",
+    run: ({ openSettings }) => openSettings(),
   });
 });

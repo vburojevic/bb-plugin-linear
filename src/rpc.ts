@@ -88,4 +88,28 @@ export const serverRpcContract = defineRpcContract({
   updateIssue: legacyContract.updateIssue,
   editorOptions: legacyContract.editorOptions,
   comment: legacyContract.comment,
+
+  /* ── M4: the nav panel, on the legacy shapes ─────────────────────────── */
+  /*
+   * Same lift, same reason: the grouped-list projections (`select/panel.ts`,
+   * `panel.ts`) and the views over them port unchanged. The panel reads the
+   * mirror and never waits on Linear — `panel` is the one rpc a sidebar
+   * paints from.
+   */
+  connection: legacyContract.connection,
+  workspaces: legacyContract.workspaces,
+  refreshWorkspace: legacyContract.refreshWorkspace,
+  panel: legacyContract.panel,
+  facets: legacyContract.facets,
+  workingSet: legacyContract.workingSet,
+  preferences: legacyContract.preferences,
+  setSort: legacyContract.setSort,
+  bindings: legacyContract.bindings,
+  bind: legacyContract.bind,
+  unbind: legacyContract.unbind,
+  resolveIdentifiers: legacyContract.resolveIdentifiers,
+  archiveIssue: legacyContract.archiveIssue,
+  startThread: legacyContract.startThread,
+  inbox: legacyContract.inbox,
+  dismissInbox: legacyContract.dismissInbox,
 });

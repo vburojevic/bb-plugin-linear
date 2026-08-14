@@ -39,6 +39,14 @@ import {
   updateIssue,
   type MutationDeps,
 } from "./src/mutations.js";
+import {
+  buildFacets,
+  buildPanelView,
+  buildRowViews,
+  buildWorkingSet,
+  type PanelDeps,
+} from "./src/panel.js";
+import type { IssueRow } from "./src/store/rows.js";
 import { estimateLabel, estimateScale, selectDetail } from "./src/select/detail.js";
 import { initialsOf } from "./src/select/panel.js";
 import { toneForStateType } from "./src/select/tone.js";
@@ -595,9 +603,29 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     }
 
     /* ── Panel plumbing ──────────────────────────────────────────────────── */
-    /* The old panel's deps builder was cut with its rpc surface; the new
-     * surfaces (M3 header/side panel, M4 nav panel) compose their own from
-     * bbFactsFor + panelNotice, which stay. */
+
+    async function panelDeps(): Promise<PanelDeps> {
+      const values = await settings.get();
+      const hasCredential = values.apiKey !== undefined && values.apiKey.trim() !== "";
+      return {
+        store,
+        now,
+        hasCredential,
+        boundTeamIds: expandTeams(store.boundTeamIds(), store.teams(), values.includeSubTeams),
+        backfilledTeamIds: await backfilledTeamIds(),
+        notice: panelNotice(),
+        bbFacts: bbFactsFor(
+          store
+            .queryIssues({
+              teamIds: expandTeams(store.boundTeamIds(), store.teams(), values.includeSubTeams),
+              includeCompleted: true,
+              sort: "updated",
+              limit: 500,
+            })
+            .map((issue) => issue.id),
+        ),
+      };
+    }
 
     /**
      * Failure-first: one clock per row, always naming what failed, when it
@@ -2005,6 +2033,240 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         } catch (error) {
           return { ok: false, message: describeError(error) };
         }
+      },
+
+      /* ── M4: the nav panel ─────────────────────────────────────────────── */
+
+      async connection({ recheck }) {
+        return { state: await connectionState(recheck === true) };
+      },
+
+      async workspaces() {
+        const states = await slotStates(false);
+        const teamsPerWorkspace = new Map<string, number>();
+        for (const entry of store.teams()) {
+          if (entry.workspaceId === null) continue;
+          teamsPerWorkspace.set(
+            entry.workspaceId,
+            (teamsPerWorkspace.get(entry.workspaceId) ?? 0) + 1,
+          );
+        }
+        const workspaceBySlot = new Map(store.workspaces().map((entry) => [entry.slot, entry]));
+
+        return {
+          workspaces: states.map((entry) => {
+            const workspace = workspaceBySlot.get(entry.slot);
+            return {
+              slot: entry.slot,
+              label: entry.label,
+              teams: workspace === undefined ? 0 : (teamsPerWorkspace.get(workspace.id) ?? 0),
+              state: entry.state,
+            };
+          }),
+        };
+      },
+
+      async refreshWorkspace() {
+        const result = await cliEnvironment.refresh();
+        return {
+          ok: result.ok,
+          message: result.text.trim(),
+          teamsVisible: store.teams().length,
+        };
+      },
+
+      async panel(query) {
+        // The rpc call *is* the visibility signal — no second channel to keep
+        // in step, and true by construction.
+        lastPanelReadAt = now();
+        lastFrontendReadAt = now();
+        const deps = await panelDeps();
+        // Mounting the panel is what starts the first read. Doing it here
+        // rather than in the factory keeps the load path offline-safe: a
+        // flaky connection during an upgrade must not fail activation.
+        if (deps.hasCredential && store.teams().length === 0) {
+          lifetime.detach("discover", async () => {
+            await discoverOnce();
+          });
+        }
+        if (deps.boundTeamIds.length > 0) {
+          lifetime.detach("backfill", async () => {
+            await backfillOnce(false);
+          });
+        }
+        return buildPanelView(deps, {
+          team: query.team,
+          grouping: query.grouping,
+          sort: query.sort,
+          search: query.search,
+          filters: query.filters,
+        });
+      },
+
+      async facets({ team }) {
+        return buildFacets(await panelDeps(), team);
+      },
+
+      async workingSet({ team }) {
+        lastPanelReadAt = now();
+        lastFrontendReadAt = now();
+        const deps = await panelDeps();
+        if (deps.boundTeamIds.length > 0) {
+          lifetime.detach("backfill", async () => {
+            await backfillOnce(false);
+          });
+        }
+        return { view: buildWorkingSet(deps, team), notice: panelNotice() };
+      },
+
+      async bindings() {
+        const projects = await projectSummaries();
+        if (store.teams().length === 0) {
+          lifetime.detach("discover", async () => {
+            await discoverOnce();
+          });
+        }
+        return buildBindingsView({
+          projects,
+          bindings: store.bindings(),
+          teams: store.teams(),
+          workspaces: store.workspaces(),
+          workspaceName: store.workspace()?.name ?? null,
+        });
+      },
+
+      async bind({ projectId, teamId, role }) {
+        const team = store.team(teamId);
+        if (team === null) {
+          return { ok: false, message: "That team isn't in the local copy yet. Try again in a moment." };
+        }
+        store.setBinding(projectId, teamId, role, now());
+        refreshBindings();
+        publish("linear:data");
+        lifetime.detach("backfill", async () => {
+          await backfillOnce(false);
+        });
+        return {
+          ok: true,
+          message: `Reading ${team.name}'s open issues — this takes a few seconds the first time.`,
+        };
+      },
+
+      async unbind({ projectId, teamId }) {
+        store.removeBinding(projectId, teamId);
+        refreshBindings();
+        publish("linear:data");
+        // The issues stay until the nightly prune, which is deliberate: a
+        // mis-click that dropped a binding should not also cost the local copy
+        // and a fresh backfill to undo.
+        return { ok: true, message: null };
+      },
+
+      async resolveIdentifiers({ identifiers, threadId }) {
+        if (identifiers.length === 0) return { issues: [] };
+
+        const thread =
+          threadId === null
+            ? null
+            : await lifetime.runAsync("thread", () => bb.sdk.threads.get({ threadId }), null);
+        const projectId = thread?.projectId ?? null;
+        const current = projectId === null ? null : scopeFor(projectId, bindingSnapshot);
+
+        // With no project to scope by, every bound team is fair game — the
+        // alternative is answering nothing at all in a personal thread.
+        const readable =
+          current === null || current.readTeamIds.length === 0
+            ? store.boundTeamIds()
+            : current.readTeamIds;
+
+        const rows: IssueRow[] = [];
+        const seen = new Set<string>();
+        for (const identifier of identifiers) {
+          const issue = store.issueByIdentifier(identifier);
+          if (issue === null) continue;
+          if (!readable.includes(issue.teamId)) continue;
+          if (seen.has(issue.id)) continue;
+          seen.add(issue.id);
+          rows.push(issue);
+        }
+        if (rows.length === 0) return { issues: [] };
+
+        return { issues: buildRowViews(await panelDeps(), rows) };
+      },
+
+      async preferences() {
+        const record = await kv.readOptional(KV.sortPreference, sortPreferenceSchema);
+        return { sort: record?.sort ?? null };
+      },
+
+      async setSort({ sort }) {
+        await kv.write(KV.sortPreference, { v: 1, sort });
+        return { ok: true };
+      },
+
+      async archiveIssue({ id }) {
+        try {
+          await archiveIssue(mutations, id);
+          return { ok: true, message: null };
+        } catch (error) {
+          return { ok: false, message: describeError(error) };
+        }
+      },
+
+      async startThread() {
+        return {
+          ok: false,
+          threadId: null,
+          message: "Starting a thread from an issue arrives with M8.",
+          note: null,
+        };
+      },
+
+      async inbox({ markSeen }) {
+        lastFrontendReadAt = now();
+        const rows = store.inbox({ limit: 200 });
+        const members = new Map(store.members().map((member) => [member.id, member]));
+
+        const items = rows.map((row) =>
+          selectInboxItem({
+            row: {
+              ...row,
+              kind: row.kind as ReturnType<typeof classify>,
+            },
+            actor: row.actorId === null ? null : (members.get(row.actorId) ?? null),
+            issue:
+              row.issueId === null
+                ? null
+                : (() => {
+                    const issue = store.issue(row.issueId);
+                    return issue === null
+                      ? null
+                      : { identifier: issue.identifier, title: issue.title };
+                  })(),
+            blockers: [],
+            now: now(),
+          }),
+        );
+
+        // Opening the segment marks visible rows seen. **Seen is not
+        // handled**: a row stays until it is dismissed.
+        if (markSeen === true) {
+          store.markInboxSeen(
+            rows.filter((row) => row.seenAt === null).map((row) => row.key),
+            now(),
+          );
+          publish("linear:inbox");
+        }
+
+        return { items, unseen: store.unseenInboxCount() };
+      },
+
+      async dismissInbox({ keys, all }) {
+        const target = all === true ? store.inbox({ limit: 500 }).map((row) => row.key) : keys;
+        store.dismissInbox(target, now());
+        publish("linear:inbox");
+        publish("linear:data");
+        return { ok: true, dismissed: target.length };
       },
     });
 
