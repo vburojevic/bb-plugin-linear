@@ -125,26 +125,43 @@ describe("inboxInterval", () => {
 });
 
 describe("advanceWatermark", () => {
-  it("checkpoints to the oldest updatedAt minus the overlap", () => {
-    // Checkpointing to the NEWEST means a crash mid-walk skips everything the
-    // walk had not reached. The oldest re-reads a page instead of losing one,
-    // and re-reading is free because every write is an upsert by id.
-    expect(advanceWatermark(1000, { oldestUpdatedAt: 500_000, complete: true })).toBe(
+  it("checkpoints to the newest updatedAt minus the overlap", () => {
+    // A completed walk has read everything newer than the cursor, so the
+    // newest is the honest checkpoint. The overlap re-reads a moment of it,
+    // which is free because every write is an upsert by id.
+    expect(advanceWatermark(1000, { newestUpdatedAt: 500_000, complete: true })).toBe(
       500_000 - WATERMARK_OVERLAP_MS,
     );
   });
 
+  it("makes progress across ticks instead of pinning", () => {
+    // The bug this replaced: checkpointing to the OLDEST row meant the next
+    // query returned the same rows, whose oldest was the same value, so the
+    // cursor never advanced again while the matching set grew without bound.
+    // Two ticks over a stable window must converge, not oscillate.
+    const first = advanceWatermark(0, { newestUpdatedAt: 500_000, complete: true });
+    const second = advanceWatermark(first, { newestUpdatedAt: 500_000, complete: true });
+    expect(first).toBe(500_000 - WATERMARK_OVERLAP_MS);
+    expect(second).toBe(first);
+
+    // And a later change moves it forward rather than being stranded behind
+    // an old row that never changes again.
+    expect(advanceWatermark(second, { newestUpdatedAt: 900_000, complete: true })).toBe(
+      900_000 - WATERMARK_OVERLAP_MS,
+    );
+  });
+
   it("never moves on an incomplete walk", () => {
-    expect(advanceWatermark(1000, { oldestUpdatedAt: 500_000, complete: false })).toBe(1000);
+    expect(advanceWatermark(1000, { newestUpdatedAt: 500_000, complete: false })).toBe(1000);
   });
 
   it("never moves backwards", () => {
     // A watermark that moves backwards re-reads the same window forever.
-    expect(advanceWatermark(900_000, { oldestUpdatedAt: 500_000, complete: true })).toBe(900_000);
+    expect(advanceWatermark(900_000, { newestUpdatedAt: 500_000, complete: true })).toBe(900_000);
   });
 
   it("does not move on an empty page", () => {
-    expect(advanceWatermark(1000, { oldestUpdatedAt: null, complete: true })).toBe(1000);
+    expect(advanceWatermark(1000, { newestUpdatedAt: null, complete: true })).toBe(1000);
   });
 
   it("treats zero as 'never synced' rather than as 1970", () => {

@@ -243,8 +243,14 @@ export function applyIssues(
   store: Store,
   nodes: readonly IssueNode[],
   at: number,
-): { readonly written: number; readonly oldestUpdatedAt: number | null } {
-  if (nodes.length === 0) return { written: 0, oldestUpdatedAt: null };
+): {
+  readonly written: number;
+  readonly oldestUpdatedAt: number | null;
+  readonly newestUpdatedAt: number | null;
+} {
+  if (nodes.length === 0) {
+    return { written: 0, oldestUpdatedAt: null, newestUpdatedAt: null };
+  }
 
   const rows = nodes.map(toIssueInput);
   store.putIssues(rows, at);
@@ -259,10 +265,12 @@ export function applyIssues(
   }
 
   let oldest: number | null = null;
+  let newest: number | null = null;
   for (const row of rows) {
     if (oldest === null || row.updatedAt < oldest) oldest = row.updatedAt;
+    if (newest === null || row.updatedAt > newest) newest = row.updatedAt;
   }
-  return { written: rows.length, oldestUpdatedAt: oldest };
+  return { written: rows.length, oldestUpdatedAt: oldest, newestUpdatedAt: newest };
 }
 
 /**

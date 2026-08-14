@@ -82,9 +82,11 @@ export async function runTick(deps: TickDeps, input: TickInput): Promise<TickOut
   );
   deps.store.putComments(attached);
 
-  let oldestComment: number | null = null;
+  let newestComment: number | null = null;
   for (const comment of attached) {
-    if (oldestComment === null || comment.updatedAt < oldestComment) oldestComment = comment.updatedAt;
+    if (newestComment === null || comment.updatedAt > newestComment) {
+      newestComment = comment.updatedAt;
+    }
   }
 
   return {
@@ -93,11 +95,11 @@ export async function runTick(deps: TickDeps, input: TickInput): Promise<TickOut
     commentsWritten: attached.length,
     changed: issues.written > 0 || attached.length > 0,
     issuesWatermark: advanceWatermark(input.issuesWatermark, {
-      oldestUpdatedAt: issues.oldestUpdatedAt,
+      newestUpdatedAt: issues.newestUpdatedAt,
       complete: !result.issues.pageInfo.hasNextPage,
     }),
     commentsWatermark: advanceWatermark(input.commentsWatermark, {
-      oldestUpdatedAt: oldestComment,
+      newestUpdatedAt: newestComment,
       complete: !result.comments.pageInfo.hasNextPage,
     }),
     issuesComplete: !result.issues.pageInfo.hasNextPage,

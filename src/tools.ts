@@ -235,8 +235,30 @@ export function registerTools(bb: BbPluginApi, deps: ToolDeps): void {
     action: "read" | "write",
     signal?: AbortSignal,
   ): Promise<IssueRow> {
-    const local =
-      deps.store.issue(idOrIdentifier) ?? deps.store.issueByIdentifier(idOrIdentifier);
+    // Prefer an in-scope match, then refuse genuine ambiguity. ENG-42 can
+    // exist in two connected workspaces, and an agent write that inherits
+    // whichever row the index favours lands on the other company's board.
+    let local = deps.store.issue(idOrIdentifier);
+    if (local === null) {
+      const matches = deps.store.issuesByIdentifier(idOrIdentifier);
+      const permittedIds = action === "write" ? current.writeTeamIds : current.readTeamIds;
+      const inScope = matches.filter((row) => permittedIds.includes(row.teamId));
+      const candidates = inScope.length > 0 ? inScope : matches;
+      if (candidates.length > 1) {
+        const sides = candidates
+          .map(
+            (row) =>
+              `"${row.title}" in ${
+                deps.store.workspaceForTeam(row.teamId)?.name ?? "an unknown workspace"
+              }`,
+          )
+          .join(" and ");
+        throw new Error(
+          `${idOrIdentifier} exists in more than one connected workspace — ${sides}. Nothing was changed; use the issue's id or URL instead of its identifier, or ask the human which they mean.`,
+        );
+      }
+      local = candidates[0] ?? null;
+    }
     const issue = local ?? (await deps.refreshIssue(idOrIdentifier, signal));
     if (issue === null) {
       throw new Error(`No issue called ${idOrIdentifier}.`);

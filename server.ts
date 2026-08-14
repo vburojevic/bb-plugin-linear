@@ -501,11 +501,31 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * back a minute later should not cost a full re-read.
      */
     async function forgetRemovedWorkspaces(): Promise<void> {
-      const live = new Set((await activeSlots()).map((entry) => entry.slot));
+      const slots = await activeSlots();
+      // A workspace is forgotten only on positive evidence that OTHER keys are
+      // still configured. If a settings read comes back with nothing at all,
+      // that is far more likely to be a transient failure than the user having
+      // cleared every key at once — and acting on it would delete a whole
+      // workspace's mirror from a background pass with no confirmation.
+      if (slots.length === 0) {
+        lifetime.log("debug", "No configured keys visible; not forgetting any workspace.");
+        return;
+      }
+      const live = new Set(slots.map((entry) => entry.slot));
       for (const workspace of store.workspaces()) {
         if (live.has(workspace.slot as CredentialSlot)) continue;
         lifetime.log("info", `Forgetting ${workspace.name}: its API key is no longer set.`);
-        store.forgetWorkspace(workspace.id);
+        const forgotten = store.forgetWorkspace(workspace.id);
+        // The teams are gone, so their "already backfilled" markers must go
+        // too — otherwise pasting the key back leaves every team marked done
+        // and the board comes back permanently empty.
+        for (const teamId of forgotten) {
+          await kv.remove(KV.backfilled(teamId));
+        }
+        // Same for the workspace's inbox cursor: it is keyed by slot name, so
+        // a later key in the same slot would inherit a stale cursor and pull
+        // that workspace's whole backlog.
+        await kv.remove(KV.notificationWatermarkFor(workspace.slot));
       }
     }
 
@@ -541,14 +561,28 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
 
     /** Serialised the same way, and for the same reason. */
     function backfillOnce(force: boolean): Promise<{ issues: number }> {
-      if (backfilling !== null && !force) {
-        return backfilling.then(() => ({ issues: 0 }));
+      // Join an in-flight run rather than starting a second — but ONLY while
+      // one is actually in flight. The guard used to be set and never
+      // cleared, which made every later non-forced backfill a silent no-op:
+      // bind a team and its issues never arrived, because a backfill that
+      // finished an hour ago was still "in progress". `discoverOnce` next
+      // door has always had the `finally` reset; this one was missed.
+      if (backfilling !== null) {
+        const joined = backfilling;
+        if (!force) return joined.then(() => ({ issues: 0 }));
+        // A forced run waits for the in-flight one instead of racing it:
+        // two concurrent 5-page walks over the same teams spend double the
+        // budget and interleave their kv writes.
+        return joined.then(() => backfillOnce(true));
       }
       const run = backfillBoundTeams(force);
       backfilling = run.then(
         () => undefined,
         () => undefined,
       );
+      void backfilling.finally(() => {
+        backfilling = null;
+      });
       return run;
     }
 
@@ -574,9 +608,15 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      */
     const activeThreads = new Set<string>();
 
+    // Every body below touches SQLite, and thread events are fire-and-forget:
+    // a throw from a closed database handle (reload mid-turn) lands in the
+    // host's dispatch with no plugin frame to catch it — an uncaughtException
+    // that takes the bb server down. `lifetime.run` is the frame.
     bb.events.on("thread.active", ({ thread }) => {
       activeThreads.add(thread.id);
-      if (store.threadLink(thread.id) !== null) publish("linear:data");
+      lifetime.run("thread-active", () => {
+        if (store.threadLink(thread.id) !== null) publish("linear:data");
+      });
       lifetime.detach("binding", async () => {
         await evaluateThreadBinding(thread.id, []);
         // After the ladder, so a binding this very event created (a fresh
@@ -587,7 +627,9 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     });
     bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
       activeThreads.delete(thread.id);
-      if (store.threadLink(thread.id) !== null) publish("linear:data");
+      lifetime.run("thread-idle", () => {
+        if (store.threadLink(thread.id) !== null) publish("linear:data");
+      });
       // The idle event carries the last assistant text for free — the one
       // message most likely to say which issue the work turned out to be.
       lifetime.detach("binding", async () => {
@@ -598,10 +640,17 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     for (const event of ["thread.failed", "thread.archived", "thread.deleted"] as const) {
       bb.events.on(event, ({ thread }) => {
         activeThreads.delete(thread.id);
-        if (store.threadLink(thread.id) !== null) publish("linear:data");
+        lifetime.run("thread-gone", () => {
+          if (store.threadLink(thread.id) !== null) publish("linear:data");
+          // A deleted thread's link is dead weight that the panel would keep
+          // drawing bb-facts from — "a thread is working on this" about a
+          // thread that no longer exists.
+          if (event === "thread.deleted") store.unlinkThread(thread.id);
+        });
         if (event !== "thread.failed") {
           suggestions.delete(thread.id);
           instructionCache.delete(thread.id);
+          declined.delete(thread.id);
         }
       });
     }
@@ -1643,9 +1692,20 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // suppress pushes from a connected-but-unbound workspace's team-less
       // notifications. `workspaceForTeam` joins a team to its slot's
       // workspace, so a bound team whose workspace is this slot answers yes.
-      const workspaceHasBoundTeam = [...boundTeamIds].some(
-        (teamId) => store.workspaceForTeam(teamId)?.slot === slot,
-      );
+      // `workspaceForTeam` inner-joins through `team.workspace_id`, which is
+      // deliberately NULL for teams recorded before workspaces were plural.
+      // Those belong to the primary slot — the same fallback `teamsBySlot`
+      // makes — and without it an upgraded install would answer "false" for
+      // its own personal workspace and silently stop pushing legitimate
+      // team-less mentions.
+      const workspaceHasBoundTeam = [...boundTeamIds].some((teamId) => {
+        const workspace = store.workspaceForTeam(teamId);
+        const owning =
+          workspace !== null && isCredentialSlot(workspace.slot)
+            ? workspace.slot
+            : PRIMARY_SLOT;
+        return owning === slot;
+      });
       const rows = result.notifications.nodes.map((node) => toInboxRow(node, now()));
       store.putInbox(rows);
 
@@ -2654,8 +2714,24 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         return { ok: true, message: `Bound ${team.name} (${team.key}) as ${role}.` };
       },
       unbind: async ({ teamKey, projectId }) => {
-        const team = store.teamByKey(teamKey);
-        if (team === null) return { ok: false, message: `No team with key ${teamKey}.` };
+        // Same collision rule as bind, or the asymmetry lies: unbinding an
+        // arbitrary ENG while reporting "Unbound ENG" leaves the other
+        // workspace's binding in place and tells the user it is gone.
+        const matches = store.teamsByKey(teamKey);
+        if (matches.length === 0) return { ok: false, message: `No team with key ${teamKey}.` };
+        if (matches.length > 1) {
+          const sides = matches
+            .map(
+              (entry) =>
+                `${entry.name} in ${store.workspaceForTeam(entry.id)?.name ?? "an unknown workspace"}`,
+            )
+            .join(" and ");
+          return {
+            ok: false,
+            message: `${teamKey} exists in more than one connected workspace — ${sides}. Nothing was unbound; use this plugin's settings, where teams are labelled by workspace.`,
+          };
+        }
+        const team = matches[0]!;
         const resolved = projectId ?? (await defaultProjectId());
         if (resolved === null) {
           return { ok: false, message: "Name a project with --project <id>." };

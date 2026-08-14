@@ -101,6 +101,10 @@ const TEAM_COLUMNS = `
  * join, so the single-row lookups keep working and the failure looks like a
  * filter bug.
  */
+/** How many full-text hits a single query may consider. Five hundred is far
+ *  past what any panel renders and far below what freezes an event loop. */
+const FTS_MATCH_LIMIT = 500;
+
 const ISSUE_COLUMNS = `
   issue.id AS id, issue.identifier AS identifier, issue.number AS number,
   issue.team_id AS teamId, issue.title AS title, issue.description AS description,
@@ -177,7 +181,10 @@ export interface Store {
   /** Drop a workspace and the teams that came from it, for when its key is
    *  removed from settings. Issues are left to the ordinary reconcile so a key
    *  pasted back a minute later does not cost a full re-read. */
-  forgetWorkspace(workspaceId: string): void;
+  /** Forget a workspace's content. Returns the team ids that went with it, so
+   *  the caller can clear their kv backfill markers. Bindings and thread
+   *  links deliberately survive — see the implementation. */
+  forgetWorkspace(workspaceId: string): string[];
 
   putTeams(teams: readonly TeamInput[], at: number): void;
   teams(): TeamRow[];
@@ -413,8 +420,19 @@ export function createStore(db: Database): Store {
 
     const text = filter.text?.trim() ?? "";
     if (text !== "") {
+      // Bounded, and ranked before it is bounded. better-sqlite3 is
+      // synchronous, so this subquery runs on the bb server's event loop —
+      // and it is on the keystroke path (the panel search box and the `#`
+      // mention menu both re-query per character). Every token is a prefix
+      // match, so a one-character query matches a large fraction of a big
+      // mirror; materialising that whole set before the outer LIMIT is how a
+      // search box freezes an IDE. `bm25` puts the best matches inside the
+      // cap, so the bound costs relevance only past 500 hits.
       clauses.push(
-        `issue.rowid IN (SELECT rowid FROM issue_fts WHERE issue_fts MATCH ?)`,
+        `issue.rowid IN (
+           SELECT rowid FROM issue_fts WHERE issue_fts MATCH ?
+           ORDER BY bm25(issue_fts) LIMIT ${FTS_MATCH_LIMIT}
+         )`,
       );
       params.push(toMatchQuery(text));
     }
@@ -483,17 +501,39 @@ export function createStore(db: Database): Store {
     },
 
     forgetWorkspace(workspaceId) {
-      db.transaction(() => {
-        // Everything the workspace's teams own goes with them. The schema has
-        // no foreign keys (deliberately — see migrations.ts), so this cascade
-        // is the only thing standing between "cleared the key" and a mirror
-        // that keeps serving the departed workspace's issues while orphaned
-        // binding rows make the sync loop poll its team ids over the primary
-        // key forever (the audited failure).
+      return db.transaction(() => {
+        // The workspace's CONTENT goes with it — issues, comments, its teams'
+        // vocabulary — because a mirror that keeps serving a departed
+        // workspace's issues is both stale and a data-retention problem.
+        //
+        // What deliberately SURVIVES: `binding` and `thread_link`. Those are
+        // the user's own statements of intent, not Linear's data, and this
+        // function runs from a *detached discovery pass* whose only evidence
+        // is one settings read — a transient empty read would otherwise
+        // silently destroy bindings with no confirmation and no undo. The
+        // orphan-polling problem they used to cause is solved at the source
+        // instead: `boundTeamIds()` only returns teams that still exist.
+        //
+        // Returns the forgotten team ids so the caller can clear their kv
+        // backfill markers — without that, re-adding the key leaves the
+        // teams marked "already backfilled" and the board comes back empty.
+        //
+        // `workspace_id IS NULL` teams belong to the primary workspace by
+        // construction (the pre-M13 upgrade state), so forgetting the primary
+        // slot's workspace must sweep them too or clearing the first key
+        // leaves the entire mirror behind.
+        const primary =
+          (db.prepare(`SELECT slot FROM workspace WHERE id = ?`).get(workspaceId) as
+            | { slot: string }
+            | undefined)?.slot === "apiKey";
         const teamIds = (
-          db.prepare(`SELECT id FROM team WHERE workspace_id = ?`).all(workspaceId) as {
-            id: string;
-          }[]
+          db
+            .prepare(
+              primary
+                ? `SELECT id FROM team WHERE workspace_id = ? OR workspace_id IS NULL`
+                : `SELECT id FROM team WHERE workspace_id = ?`,
+            )
+            .all(workspaceId) as { id: string }[]
         ).map((row) => row.id);
         if (teamIds.length > 0) {
           const marks = placeholders(teamIds.length);
@@ -508,9 +548,9 @@ export function createStore(db: Database): Store {
               WHERE issue_id IN (SELECT id FROM issue WHERE team_id IN (${marks}))`,
           ).run(...teamIds);
           db.prepare(`DELETE FROM issue WHERE team_id IN (${marks})`).run(...teamIds);
-          db.prepare(`DELETE FROM binding WHERE team_id IN (${marks})`).run(...teamIds);
-          db.prepare(`DELETE FROM thread_link WHERE team_id IN (${marks})`).run(...teamIds);
           db.prepare(`DELETE FROM inbox WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM workflow_state WHERE team_id IN (${marks})`).run(...teamIds);
+          db.prepare(`DELETE FROM label WHERE team_id IN (${marks})`).run(...teamIds);
           db.prepare(`DELETE FROM cycle WHERE team_id IN (${marks})`).run(...teamIds);
           db.prepare(`DELETE FROM team_member WHERE team_id IN (${marks})`).run(...teamIds);
           db.prepare(`DELETE FROM git_automation_state WHERE team_id IN (${marks})`).run(
@@ -518,8 +558,13 @@ export function createStore(db: Database): Store {
           );
           db.prepare(`DELETE FROM project_team WHERE team_id IN (${marks})`).run(...teamIds);
         }
-        db.prepare(`DELETE FROM team WHERE workspace_id = ?`).run(workspaceId);
+        if (teamIds.length > 0) {
+          db.prepare(`DELETE FROM team WHERE id IN (${placeholders(teamIds.length)})`).run(
+            ...teamIds,
+          );
+        }
         db.prepare(`DELETE FROM workspace WHERE id = ?`).run(workspaceId);
+        return teamIds;
       })();
     },
 
@@ -817,7 +862,21 @@ export function createStore(db: Database): Store {
       const rows = db
         .prepare(`SELECT ${ISSUE_COLUMNS} FROM issue WHERE identifier = ? COLLATE NOCASE`)
         .all(identifier) as RawIssue[];
-      return rows.map(toIssue);
+      if (rows.length > 0) return rows.map(toIssue);
+
+      // The previous-identifier fallback, which the singular form has always
+      // had and which this one must keep: an issue moved between teams
+      // changes identifier, and a link written last month must still resolve
+      // rather than telling the user the issue does not exist. Only reached
+      // when nothing matches directly, so it cannot mask a live collision.
+      const previous = db
+        .prepare(
+          `SELECT ${ISSUE_COLUMNS} FROM issue
+             WHERE id IN (SELECT issue_id FROM issue_previous_identifier
+                           WHERE identifier = ? COLLATE NOCASE)`,
+        )
+        .all(identifier) as RawIssue[];
+      return previous.map(toIssue);
     },
 
     issuesByBranch(branchName) {
@@ -1355,10 +1414,19 @@ export function createStore(db: Database): Store {
     },
 
     boundTeamIds() {
+      // Only teams that still exist. A binding whose team is gone — the key
+      // that reached it was cleared — must not keep driving the sync loop,
+      // which would send that workspace's team ids over whichever key is left
+      // and get silently empty answers forever. The binding row itself
+      // survives (it is the user's intent, and re-adding the key restores it);
+      // it just stops being a sync instruction while its team is absent.
       return (
-        db.prepare(`SELECT DISTINCT team_id AS teamId FROM binding`).all() as {
-          teamId: string;
-        }[]
+        db
+          .prepare(
+            `SELECT DISTINCT b.team_id AS teamId
+               FROM binding b JOIN team t ON t.id = b.team_id`,
+          )
+          .all() as { teamId: string }[]
       ).map((row) => row.teamId);
     },
 

@@ -46,6 +46,36 @@ describe("cross-workspace key collision is detectable", () => {
     store.putIssues([issue({ id: "ip", identifier: "ENG-7", teamId: "team_p_eng", title: "only personal" })], NOW);
     expect(store.issuesByIdentifier("ENG-7").map((r) => r.id)).toEqual(["ip"]);
   });
+
+  it("still resolves an issue that MOVED teams and changed identifier", () => {
+    // The regression this exists to prevent: the plural lookup replaced a
+    // singular one that had a previous-identifier fallback, so every write
+    // path stopped resolving renamed issues — the panel would render an issue
+    // fine and then refuse every edit on it.
+    const store = twoWorkspaceStore();
+    store.putIssues(
+      [issue({ id: "im", identifier: "PLAT-7", teamId: "team_p_eng", title: "moved" })],
+      NOW,
+    );
+    store.putPreviousIdentifiers("im", ["ENG-42"]);
+
+    expect(store.issuesByIdentifier("PLAT-7").map((r) => r.id)).toEqual(["im"]);
+    expect(store.issuesByIdentifier("ENG-42").map((r) => r.id)).toEqual(["im"]);
+  });
+
+  it("prefers a live identifier over someone else's former one", () => {
+    // The fallback must never mask a real, current match.
+    const store = twoWorkspaceStore();
+    store.putIssues(
+      [
+        issue({ id: "live", identifier: "ENG-42", teamId: "team_p_eng", title: "current" }),
+        issue({ id: "old", identifier: "PLAT-9", teamId: "team_p_eng", title: "moved away" }),
+      ],
+      NOW,
+    );
+    store.putPreviousIdentifiers("old", ["ENG-42"]);
+    expect(store.issuesByIdentifier("ENG-42").map((r) => r.id)).toEqual(["live"]);
+  });
 });
 
 describe("forgetWorkspace removes everything the workspace owned", () => {
@@ -66,13 +96,13 @@ describe("forgetWorkspace removes everything the workspace owned", () => {
 
     store.forgetWorkspace("ws_company");
 
-    // Company gone, root and branch.
+    // The company's DATA is gone — the staleness and retention win.
     expect(store.issue("ic")).toBeNull();
     expect(store.comments("ic")).toEqual([]);
-    expect(store.threadLink("th_c")).toBeNull();
     expect(store.team("team_c_eng")).toBeNull();
-    expect(store.boundTeamIds()).not.toContain("team_c_eng");
     expect(store.inbox({ limit: 10 }).some((row) => row.key === "n_c")).toBe(false);
+    // And it stops driving sync, which is what the cascade is really for.
+    expect(store.boundTeamIds()).not.toContain("team_c_eng");
 
     // Personal untouched — this is the half that must survive.
     expect(store.issue("ip")).not.toBeNull();
@@ -81,14 +111,99 @@ describe("forgetWorkspace removes everything the workspace owned", () => {
     expect(store.team("team_p_eng")).not.toBeNull();
   });
 
-  it("leaves no orphaned binding that would keep the sync loop polling the gone team", () => {
-    // The audited failure: a surviving binding row makes boundTeamIds() return
-    // a team whose workspace no longer exists, and the sync loop then polls
-    // that id over the primary key forever.
+  it("leaves the full-text index consistent — a forgotten issue is unsearchable", () => {
+    // `issue_fts` is external-content: it holds no copy of the text and
+    // SQLite does not maintain the link. If the DELETE trigger did not fire
+    // for the cascade, search would keep returning company rows whose issue
+    // record is gone — the worst kind of stale, because the row then fails to
+    // open.
     const store = twoWorkspaceStore();
     store.setBinding("proj_company", "team_c_eng", "primary", NOW);
+    store.putIssues(
+      [issue({ id: "ic", identifier: "ENG-9", teamId: "team_c_eng", title: "confidential acquisition plan" })],
+      NOW,
+    );
+    expect(
+      store.queryIssues({ teamIds: ["team_c_eng"], text: "acquisition", sort: "updated", limit: 10 }),
+    ).toHaveLength(1);
+
     store.forgetWorkspace("ws_company");
+
+    // Searched without a team filter, so nothing but the index itself can
+    // hide the row.
+    expect(
+      store.queryIssues({ teamIds: [], text: "acquisition", sort: "updated", limit: 10 }),
+    ).toEqual([]);
+    expect(
+      store.queryIssues({ teamIds: ["team_c_eng"], text: "acquisition", sort: "updated", limit: 10 }),
+    ).toEqual([]);
+  });
+
+  it("keeps the user's own intent — bindings and thread links survive", () => {
+    // This runs from a DETACHED discovery pass whose only evidence is one
+    // settings read. If a transient empty read could destroy bindings and
+    // thread links, a hiccup would silently cost work nobody can get back —
+    // so the cascade takes Linear's data and leaves the user's statements.
+    const store = twoWorkspaceStore();
+    store.putIssues(
+      [issue({ id: "ic", identifier: "ENG-1", teamId: "team_c_eng", title: "x" })],
+      NOW,
+    );
+    store.setBinding("proj_company", "team_c_eng", "primary", NOW);
+    store.linkThread({
+      threadId: "th_c",
+      issueId: "ic",
+      teamId: "team_c_eng",
+      projectId: "proj_company",
+      createdAt: NOW,
+      origin: "manual",
+    });
+
+    store.forgetWorkspace("ws_company");
+
+    expect(store.bindingsForProject("proj_company")).toHaveLength(1);
+    expect(store.threadLink("th_c")).not.toBeNull();
+    // …but neither one resurrects the departed workspace as a sync target.
     expect(store.boundTeamIds()).toEqual([]);
-    expect(store.bindings()).toEqual([]);
+  });
+
+  it("returns the forgotten team ids, so their backfill markers can be cleared", () => {
+    // Without clearing `backfilled:<teamId>`, pasting the key back leaves
+    // every team marked "already synced" and the board comes back
+    // permanently empty.
+    const store = twoWorkspaceStore();
+    expect(store.forgetWorkspace("ws_company")).toEqual(["team_c_eng"]);
+  });
+
+  it("sweeps teams with no recorded workspace when the primary key goes", () => {
+    // `workspace_id` is deliberately NULL for teams recorded before the
+    // mirror knew about multiple workspaces. Those belong to the primary
+    // slot, so forgetting the primary workspace must take them — otherwise
+    // clearing the first key leaves the entire mirror behind, which is the
+    // exact leak this cascade exists to close.
+    const store = createTestStore();
+    store.putWorkspace(
+      {
+        id: "ws_p",
+        slot: "apiKey",
+        name: "Personal",
+        urlKey: "p",
+        viewerId: "u",
+        viewerName: "U",
+        gitBranchFormat: null,
+      },
+      NOW,
+    );
+    store.putTeams([team("team_legacy", "OLD")], NOW); // workspaceId defaults to null
+    store.putIssues(
+      [issue({ id: "il", identifier: "OLD-1", teamId: "team_legacy", title: "legacy" })],
+      NOW,
+    );
+
+    const forgotten = store.forgetWorkspace("ws_p");
+
+    expect(forgotten).toContain("team_legacy");
+    expect(store.team("team_legacy")).toBeNull();
+    expect(store.issue("il")).toBeNull();
   });
 });

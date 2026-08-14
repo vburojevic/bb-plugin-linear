@@ -256,6 +256,8 @@ describe("applyIssues", () => {
     );
     expect(result.written).toBe(2);
     expect(result.oldestUpdatedAt).toBe(Date.parse("2026-08-12T08:00:00.000Z"));
+    // The newest is what the watermark checkpoints to on a complete walk.
+    expect(result.newestUpdatedAt).toBe(Date.parse("2026-08-12T12:00:00.000Z"));
   });
 
   it("is idempotent, so a deliberate watermark overlap costs nothing", () => {
@@ -278,7 +280,11 @@ describe("applyIssues", () => {
 
   it("answers null for an empty page rather than moving the watermark", () => {
     const store = createTestStore();
-    expect(applyIssues(store, [], NOW)).toEqual({ written: 0, oldestUpdatedAt: null });
+    expect(applyIssues(store, [], NOW)).toEqual({
+      written: 0,
+      oldestUpdatedAt: null,
+      newestUpdatedAt: null,
+    });
   });
 });
 

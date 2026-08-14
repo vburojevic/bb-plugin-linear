@@ -288,3 +288,39 @@ describe("checkWebhookUrl refuses private targets", () => {
     expect(checkWebhookUrl("https://hooks.example.com/linear").ok).toBe(true);
   });
 })
+
+describe("isPrivateHost — bypasses and false positives", () => {
+  it("blocks IPv4-mapped IPv6 spellings of loopback and metadata", () => {
+    // WHATWG URL normalises ::ffff:127.0.0.1 to its hex form, so the guard
+    // has to understand both spellings or the block is one syntax away.
+    for (const host of [
+      "::ffff:127.0.0.1", "::ffff:7f00:1",
+      "::ffff:169.254.169.254", "::ffff:a9fe:a9fe",
+      "::",
+    ]) {
+      expect(isPrivateHost(host), host).toBe(true);
+    }
+  });
+
+  it("blocks a trailing-dot localhost and CGNAT space", () => {
+    expect(isPrivateHost("localhost.")).toBe(true);
+    expect(isPrivateHost("100.64.0.1")).toBe(true);
+    expect(isPrivateHost("100.127.255.255")).toBe(true);
+  });
+
+  it("does NOT refuse ordinary hostnames that merely start with fc/fd/fe80", () => {
+    // The IPv6 unique-local prefixes were being tested against every
+    // hostname, so real public endpoints were refused as "private
+    // addresses" — a wrong answer with a nonsense explanation.
+    for (const host of ["fcbarcelona.com", "fdny.gov", "fe80.example.com", "fc-hooks.acme.io"]) {
+      expect(isPrivateHost(host), host).toBe(false);
+    }
+    expect(checkWebhookUrl("https://fcbarcelona.com/hook").ok).toBe(true);
+  });
+
+  it("still blocks genuine IPv6 private literals", () => {
+    for (const host of ["::1", "fd00::1", "fe80::1", "fc00::1"]) {
+      expect(isPrivateHost(host), host).toBe(true);
+    }
+  });
+})

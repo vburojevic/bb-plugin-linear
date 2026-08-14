@@ -71,7 +71,18 @@ export class LinearError extends Error {
     // exactly what a host that serializes error objects would carry out.
     this.errors = (options.errors ?? []).map((entry) => ({
       ...entry,
-      message: redact(entry.message),
+      // `typeof` because this array comes off the wire: a malformed body with
+      // a non-string `message` would otherwise throw from inside an error
+      // constructor, turning a classified failure into a TypeError.
+      message: typeof entry.message === "string" ? redact(entry.message) : "",
+      // `extensions` is where a GraphQL validation error echoes the input it
+      // rejected — the exact place a webhook signing secret sent as a
+      // variable would land, so redacting only `message` left the claimed
+      // hole half open. Values are redacted in place; keys and structure are
+      // preserved because the transport switches on `extensions.code`.
+      ...(entry.extensions === undefined
+        ? {}
+        : { extensions: redactValues(entry.extensions) as Record<string, unknown> }),
     }));
   }
 }
@@ -240,6 +251,28 @@ const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/-]{8,}=*/gi;
  * dump, where it appears after `Authorization:` in a form the other two passes
  * cannot recognise).
  */
+/**
+ * `redact` applied to every string inside an arbitrary JSON value, structure
+ * intact. For the places a secret can arrive nested rather than in a sentence
+ * — a GraphQL error's `extensions`, which echoes rejected input.
+ *
+ * Depth-bounded because the value is attacker-shaped: a deeply nested or
+ * cyclic body must not become a stack overflow inside an error constructor.
+ */
+export function redactValues(value: unknown, depth = 0): unknown {
+  if (depth > 8) return "[truncated]";
+  if (typeof value === "string") return redact(value);
+  if (Array.isArray(value)) return value.map((entry) => redactValues(entry, depth + 1));
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactValues(entry, depth + 1);
+    }
+    return out;
+  }
+  return value;
+}
+
 export function redact(text: string): string {
   if (text === "") return text;
   let output = text;

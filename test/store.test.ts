@@ -233,10 +233,33 @@ describe("bindings", () => {
 
   it("keeps one project's binding out of another's", () => {
     const store = createTestStore();
+    store.putTeams([team("team_eng", "ENG"), team("team_des", "DES")], NOW);
     store.setBinding("proj_1", "team_eng", "primary", NOW);
     store.setBinding("proj_2", "team_des", "primary", NOW);
     expect(store.bindingsForProject("proj_1")).toHaveLength(1);
     expect(store.boundTeamIds().sort()).toEqual(["team_des", "team_eng"]);
+  });
+
+  it("stops treating a binding as a sync instruction once its team is gone", () => {
+    // A binding whose team was removed with its workspace must not keep the
+    // sync loop polling that id over whichever key is left — it would send a
+    // departed workspace's team ids to the wrong API and get silently empty
+    // answers forever. The binding row itself survives (it is the user's
+    // intent, restored when the key comes back); it just stops driving sync.
+    const store = createTestStore();
+    store.putTeams([team("team_eng", "ENG")], NOW);
+    store.setBinding("proj_1", "team_eng", "primary", NOW);
+    expect(store.boundTeamIds()).toEqual(["team_eng"]);
+
+    store.putWorkspace(
+      { id: "ws", slot: "apiKey2", name: "Gone", urlKey: "gone", viewerId: "u", viewerName: "U", gitBranchFormat: null },
+      NOW,
+    );
+    store.putTeams([team("team_eng", "ENG", { workspaceId: "ws" })], NOW);
+    store.forgetWorkspace("ws");
+
+    expect(store.boundTeamIds()).toEqual([]);
+    expect(store.bindingsForProject("proj_1")).toHaveLength(1);
   });
 
   it("re-binding the same team changes its role in place", () => {

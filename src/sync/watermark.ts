@@ -8,13 +8,22 @@ import { z } from "zod";
  * seconds of changes on every tick, forever, silently — and nobody notices
  * until an issue that definitely moved is definitely not in the panel.
  *
- * **Checkpoint to the oldest `updatedAt` in the last completed page, minus an
- * overlap.** Checkpointing to the newest means a crash mid-walk skips
- * everything the walk had not reached. The overlap is free because every write
- * is an upsert by `id`, and it is *necessary* because `orderBy: updatedAt`
- * with cursor pagination genuinely drifts when rows mutate mid-walk: a row
- * updated while you are paging moves to the end of the ordering and the cursor
- * walks past where it used to be.
+ * **Checkpoint to the NEWEST `updatedAt` in a completed walk, minus an
+ * overlap** — and do not move at all on an incomplete one.
+ *
+ * The earlier rule here was "checkpoint to the oldest", reasoning that
+ * checkpointing to the newest skips whatever a crash mid-walk had not
+ * reached. That reasoning is sound, but it describes the *incomplete* case,
+ * which this function already handles by refusing to move. In the only branch
+ * where the oldest was actually used — a walk that read everything newer than
+ * the cursor — it was a permanent pin: the next query returns the same rows,
+ * whose oldest is the same value, so the cursor never advances again while
+ * the matching set grows without bound. Two independent audits found this;
+ * the notification lane next door had always used the newest, correctly.
+ *
+ * The overlap stays, and is still necessary: `orderBy: updatedAt` with cursor
+ * pagination genuinely drifts when rows mutate mid-walk. It is free because
+ * every write is an upsert by `id`.
  */
 
 /** Sixty seconds of deliberate re-reading. Costs one page occasionally;
@@ -29,9 +38,9 @@ export const watermarkSchema = z.object({
 export type Watermark = z.infer<typeof watermarkSchema>;
 
 export interface PageOutcome {
-  /** The oldest `updatedAt` in the page just applied, or `null` for an empty
-   *  page. */
-  readonly oldestUpdatedAt: number | null;
+  /** The newest `updatedAt` in the walk just applied, or `null` for an empty
+   *  page. This is the checkpoint on a complete walk. */
+  readonly newestUpdatedAt: number | null;
   /** Whether the walk finished. A partial walk must not advance the cursor
    *  past what it actually read. */
   readonly complete: boolean;
@@ -46,8 +55,8 @@ export interface PageOutcome {
  */
 export function advanceWatermark(current: number, outcome: PageOutcome): number {
   if (!outcome.complete) return current;
-  if (outcome.oldestUpdatedAt === null) return current;
-  const candidate = outcome.oldestUpdatedAt - WATERMARK_OVERLAP_MS;
+  if (outcome.newestUpdatedAt === null) return current;
+  const candidate = outcome.newestUpdatedAt - WATERMARK_OVERLAP_MS;
   return Math.max(current, candidate);
 }
 

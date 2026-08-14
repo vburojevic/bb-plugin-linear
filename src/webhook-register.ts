@@ -106,10 +106,35 @@ export function checkWebhookUrl(raw: string): UrlVerdict {
  * is out of scope for a local, write-gated, user-typed command).
  */
 export function isPrivateHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  // A trailing dot is a fully-qualified name and resolves identically, so it
+  // must not be a way around the name checks.
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
   if (host === "localhost" || host.endsWith(".localhost")) return true;
-  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80"))
-    return true;
+
+  // IPv6 only when it actually IS an IPv6 literal. Testing these prefixes
+  // against any hostname refuses `fcbarcelona.com` and `fdny.gov` as "private
+  // addresses" — a wrong refusal with a nonsense explanation.
+  if (host.includes(":")) {
+    if (host === "::1" || host === "::") return true;
+    if (/^f[cd][0-9a-f]{0,2}:/.test(host)) return true; // unique-local
+    if (/^fe[89ab][0-9a-f]:/.test(host)) return true; // link-local
+    // An IPv4-mapped or -compatible address is the mapped address: the
+    // ::ffff:127.0.0.1 spelling of loopback must not read as public.
+    const mapped = host.match(/^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+    if (mapped !== null) return isPrivateHost(mapped[1]!);
+    const hex = host.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hex !== null) {
+      // WHATWG URL normalises ::ffff:127.0.0.1 to its hex form, so the same
+      // address arrives spelled ::ffff:7f00:1.
+      const high = Number.parseInt(hex[1]!, 16);
+      const low = Number.parseInt(hex[2]!, 16);
+      return isPrivateHost(
+        `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`,
+      );
+    }
+    return false;
+  }
+
   const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4 === null) return false;
   const [a, b] = [Number(v4[1]), Number(v4[2])];
@@ -117,6 +142,7 @@ export function isPrivateHost(hostname: string): boolean {
   if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
   return false;
 }
 
