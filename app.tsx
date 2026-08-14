@@ -1,40 +1,23 @@
-// bb-plugin-linear — frontend entry. Registration only; views grow under
-// app/ as the milestones land (nav panel M4, header chip and issue panel M3).
-import { useEffect, useState } from "react";
-import { definePluginApp, useRpc } from "@bb/plugin-sdk/app";
-import type { rpcContract } from "./server";
+// bb-plugin-linear — frontend entry. Registration only; views live in app/.
+import "./app.css";
+import { useCallback } from "react";
+import { definePluginApp } from "@bb/plugin-sdk/app";
 import {
   Card,
   CardContent,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-
-type Status = Awaited<
-  ReturnType<ReturnType<typeof useRpc<typeof rpcContract>>["call"]>
->;
+import { HeaderChip } from "./app/HeaderChip.js";
+import { IssuePanel } from "./app/IssuePanel.js";
+import { useAsync, useLinearRpc } from "./app/rpc.js";
 
 function ConnectionCard() {
-  const rpc = useRpc<typeof rpcContract>();
-  const [status, setStatus] = useState<Status | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    rpc
-      .call("status")
-      .then((result) => {
-        if (!cancelled) setStatus(result);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-      });
-    return () => {
-      cancelled = true;
-    };
-    // The rpc handle is stable for the mounted surface.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const rpc = useLinearRpc();
+  const state = useAsync(
+    useCallback(async () => rpc.call("status"), [rpc]),
+    [],
+  );
 
   return (
     <Card>
@@ -42,17 +25,17 @@ function ConnectionCard() {
         <CardTitle>Linear</CardTitle>
       </CardHeader>
       <CardContent className="space-y-1 text-sm text-muted-foreground">
-        {error !== null ? (
-          <p className="text-destructive">{error}</p>
-        ) : status === null ? (
+        {state.status === "failed" ? (
+          <p className="text-destructive">{state.message}</p>
+        ) : state.status === "loading" ? (
           <p>Checking the connection…</p>
-        ) : !status.configured ? (
+        ) : !state.value.configured ? (
           <p>
             No API key yet — add one in this plugin&apos;s settings, or run{" "}
             <code className="text-foreground">bb plugin config linear set apiKey &lt;key&gt;</code>.
           </p>
         ) : (
-          status.accounts.map((account) => (
+          state.value.accounts.map((account) => (
             <p key={account.slot}>
               {account.error !== null
                 ? `${account.label}: ${account.error}`
@@ -70,5 +53,17 @@ export default definePluginApp((app) => {
     id: "linear-connection",
     title: "Linear",
     component: ConnectionCard,
+  });
+
+  app.slots.experimental_threadHeaderAction({
+    id: "issue-chip",
+    title: "Linear issue",
+    component: HeaderChip,
+  });
+
+  app.slots.threadPanelAction({
+    id: "issue",
+    title: "Linear issue",
+    component: IssuePanel,
   });
 });

@@ -1,0 +1,394 @@
+/*
+ * Plugin stylesheet.
+ *
+ * Two constraints shape everything here, and both are load-bearing rather than
+ * stylistic.
+ *
+ * **Colour comes from host theme tokens, never a literal.** bb ships
+ * user-swappable palettes and the plugin build's Tailwind pass emits
+ * default-theme utilities only, so a hand-written `oklch()` or a hardcoded
+ * green survives exactly one theme. Every value below resolves through a
+ * variable the host already defines.
+ *
+ * **`color-mix()` lives here, never in a class string.** The plugin Tailwind
+ * build silently drops arbitrary values containing commas — `bg-[color-mix(in
+ * srgb,var(--x) 10%,transparent)]` does not fail, it *vanishes*, and the
+ * result is an element with no background and no error anywhere. So anything
+ * with a comma in it is a class defined in this file.
+ */
+
+/*
+ * ── State tone ───────────────────────────────────────────────────────────────
+ *
+ * One variable, `--bbl`, set by a single class on an ancestor. That is what
+ * lets a row's glyph, its identifier, its border tint and its chips recolour
+ * together when an issue moves, instead of seven components each deciding what
+ * "In Progress" looks like.
+ *
+ * The tone is keyed on `WorkflowState.type`, never on a state's *name*. A
+ * workspace whose review column is called "Überprüfung" or "レビュー" is not
+ * an edge case, and matching on English is how such a workspace silently gets
+ * the wrong colour on every row.
+ *
+ * `--bbl-ink` is the same hue pulled 45% toward the foreground, which is what
+ * keeps it legible as small text in both polarities — mixing against
+ * `--foreground` rather than picking two hand-tuned values means contrast
+ * tracks the theme for free, including themes that do not exist yet.
+ */
+.bbl-triage {
+  --bbl: var(--warning, var(--foreground));
+}
+.bbl-backlog,
+.bbl-canceled,
+.bbl-duplicate,
+.bbl-unknown {
+  --bbl: var(--muted-foreground);
+}
+.bbl-unstarted {
+  --bbl: var(--foreground);
+}
+.bbl-started {
+  --bbl: var(--primary);
+}
+.bbl-completed {
+  --bbl: var(--success, var(--primary));
+}
+.bbl-triage,
+.bbl-backlog,
+.bbl-unstarted,
+.bbl-started,
+.bbl-completed,
+.bbl-canceled,
+.bbl-duplicate,
+.bbl-unknown,
+.bbl-danger,
+.bbl-neutral {
+  --bbl-ink: color-mix(in oklab, var(--bbl) 55%, var(--foreground) 45%);
+}
+
+/* Two tones that are not workflow states: an urgent priority mark, and the
+   quiet default for anything that has a tone slot but nothing to say. */
+.bbl-danger {
+  --bbl: var(--destructive);
+}
+.bbl-neutral {
+  --bbl: var(--muted-foreground);
+}
+
+.bbl-text {
+  color: var(--bbl-ink);
+}
+
+/* A tinted outline chip. Enough colour to sort at a glance, never enough to
+   compete with the text it sits beside. */
+.bbl-chip {
+  color: var(--bbl-ink);
+  background: color-mix(in srgb, var(--bbl) 10%, transparent);
+  border-color: color-mix(in srgb, var(--bbl) 26%, transparent);
+}
+
+/* The glyph itself is drawn with `currentColor`, so one rule colours every
+   shape in the state table. */
+.bbl-glyph {
+  color: var(--bbl);
+}
+
+/*
+ * ── Surfaces ─────────────────────────────────────────────────────────────────
+ */
+
+/*
+ * A failure row. Always above the content it describes, never inside it — a
+ * load that failed must not blank what is already on screen, and an
+ * explanation underneath a stale list is an explanation nobody reads before
+ * concluding the list is current.
+ */
+.bbl-notice {
+  border-radius: var(--radius-md, 0.375rem);
+  background: color-mix(in srgb, var(--bbl, var(--muted-foreground)) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bbl, var(--border)) 22%, transparent);
+}
+
+/*
+ * The capped list's scrollbar, made permanent.
+ *
+ * A list cut by `max-height` looks exactly like a list that ended, and the
+ * platform's overlay scrollbar — which fades when idle — is the only thing
+ * saying otherwise. A thin persistent track is the whole affordance: content
+ * below the fold announces itself without spending a row on a control.
+ */
+.bbl-scroller {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted-foreground) 30%, transparent) transparent;
+}
+.bbl-scroller::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.bbl-scroller::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
+}
+.bbl-scroller::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--muted-foreground) 50%, transparent);
+}
+.bbl-scroller::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/*
+ * ── The composer banner's frame ──────────────────────────────────────────────
+ *
+ * Reproduced rather than requested. The host's own prompt-stack card is
+ * `rounded-lg border border-border bg-surface-raised-solid`, and asking for
+ * `chrome: "card"` would give that for free — except that the host mounts
+ * plugin banners inside a `display: contents` wrapper and spaces the stack with
+ * margins. A contents box generates no box, so that margin is discarded and the
+ * banner sits flush against whatever is below it. Owning the frame is what lets
+ * this own the 8px too, and `margin-bottom` (never `-top`) matches the
+ * direction the native stack spaces itself.
+ */
+.bbl-stack-card {
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+  border-radius: var(--radius-lg, 0.5rem);
+  border: 1px solid var(--border);
+  background: var(--surface-raised-solid, var(--card));
+}
+
+/* The one departure from host chrome, and a deliberate one: the border carries
+   a quiet tint of the issue's own state. A backlog issue has nothing worth
+   colouring; one whose pull request just failed does, and this is what makes it
+   findable in peripheral vision without the row ever raising its voice. 30%
+   keeps it a tint on the host border rather than a highlight. */
+.bbl-stack-card.bbl-tinted {
+  border-color: color-mix(in srgb, var(--bbl) 30%, var(--border));
+  transition: border-color 0.35s ease;
+}
+
+
+/*
+ * ── The row ──────────────────────────────────────────────────────────────────
+ *
+ * A list row is the most-repeated element in the plugin and the one that has to
+ * survive being read forty times without being looked at once. So: no borders,
+ * no cards, no per-row decoration. The only things that change are what the
+ * data changes — the glyph's tone, and whether the row is the selected one.
+ *
+ * Selection is a tone-tinted wash plus a hairline inset ring in the same hue,
+ * rather than the flat host `bg-state-active`. On a list where every row is a
+ * different state, that is what makes "the row I am on" legible without
+ * out-shouting "the row that is on fire".
+ */
+.bbl-row-selected {
+  background: color-mix(in srgb, var(--bbl) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bbl) 26%, transparent);
+}
+
+/*
+ * The metadata cluster fades to make room for the row's actions on hover.
+ *
+ * Crossfaded in place rather than swapped: both layers occupy the same grid
+ * cell, so the age never moves and the list never reflows under the pointer.
+ * A list that shifts when you approach it is a list you cannot click.
+ */
+.bbl-row-meta {
+  transition: opacity 120ms ease;
+}
+.bbl-row:hover .bbl-row-meta,
+.bbl-row:focus-within .bbl-row-meta {
+  opacity: 0;
+}
+.bbl-row-actions {
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+.bbl-row:hover .bbl-row-actions,
+.bbl-row:focus-within .bbl-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/*
+ * ── Section anchors ──────────────────────────────────────────────────────────
+ *
+ * A group heading in a scrolling list has one job: tell you where you are
+ * without taking a row's worth of height to do it. Micro-caps at 10px with
+ * wide tracking reads as a label rather than as content, which is what stops
+ * it competing with the titles underneath.
+ *
+ * The hairline is on the heading's own bottom edge and the background is
+ * opaque-with-blur, because these are `position: sticky` over live rows — a
+ * translucent heading with rows sliding through it is unreadable at exactly
+ * the moment you need it.
+ */
+.bbl-section {
+  background: color-mix(in srgb, var(--background) 88%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--border) 70%, transparent);
+}
+
+/* The count beside a section label. A pill rather than "· 12", so the number
+   is a shape the eye can find rather than punctuation it has to parse. */
+.bbl-count {
+  background: color-mix(in srgb, var(--muted-foreground) 14%, transparent);
+}
+
+/*
+ * ── Labels ───────────────────────────────────────────────────────────────────
+ *
+ * A Linear label carries its own colour, chosen by the workspace. Ignoring it
+ * and rendering every label the same grey throws away the one thing the
+ * workspace already told us — but a fully saturated pill for each of six
+ * labels is a row that is all label and no issue.
+ *
+ * So: the workspace's hue at 14% as a wash, at 30% as a hairline, and pulled
+ * 45% toward the foreground for the text. Six of these sit beside each other
+ * without any of them winning.
+ *
+ * `--bbl-label` is set inline from the label's own hex. A label with no colour
+ * falls back to the muted foreground and reads as a plain chip.
+ */
+.bbl-label {
+  --bbl-label-hue: var(--bbl-label, var(--muted-foreground));
+  color: color-mix(in oklab, var(--bbl-label-hue) 55%, var(--foreground) 45%);
+  background: color-mix(in srgb, var(--bbl-label-hue) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--bbl-label-hue) 30%, transparent);
+}
+
+/* The label's own dot, at full strength. One saturated 6px circle per label is
+   enough colour to sort by; a saturated pill is not. */
+.bbl-label-dot {
+  background: var(--bbl-label, var(--muted-foreground));
+}
+
+/*
+ * ── The segmented control ────────────────────────────────────────────────────
+ *
+ * One control, not three buttons. The track is what says the three options are
+ * alternatives to each other; without it, three loose text buttons read as
+ * three unrelated links that happen to sit in a row.
+ */
+.bbl-segments {
+  background: color-mix(in srgb, var(--muted-foreground) 10%, transparent);
+}
+
+.bbl-segment-active {
+  background: var(--surface-raised-solid, var(--background));
+  box-shadow:
+    0 1px 2px color-mix(in srgb, var(--foreground) 12%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+/*
+ * ── Conversation ─────────────────────────────────────────────────────────────
+ *
+ * Comments get a rail rather than cards. A thread of six comments as six
+ * bordered boxes is six competing containers; one continuous line down the
+ * left says "this is one conversation" and costs 1px.
+ */
+.bbl-rail {
+  box-shadow: inset 1px 0 0 color-mix(in srgb, var(--border) 80%, transparent);
+}
+
+/*
+ * ── Skeletons ────────────────────────────────────────────────────────────────
+ *
+ * Shaped like the rows they stand in for, at the same heights and the same
+ * column positions, so the list does not jump when real data lands. The pulse
+ * is slow on purpose: a fast shimmer reads as an error state.
+ */
+.bbl-skeleton {
+  background: color-mix(in srgb, var(--muted-foreground) 16%, transparent);
+  animation: bbl-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes bbl-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/*
+ * ── Motion ───────────────────────────────────────────────────────────────────
+ *
+ * The panel is driven by a poller, so rows arrive, reorder and leave under the
+ * reader's eyes. Unspecified, they pop.
+ *
+ * Three movements and no more:
+ *
+ *   reorder  120ms, standard ease — a row that moved should read as the same
+ *            row in a new place, not as a different row.
+ *   arrive   a spring, and ONLY for a row entering because a thread started or
+ *            a pull request appeared. That is the one arrival worth an
+ *            eye-catch; everything else is the poller doing its job.
+ *   leave    90ms fade, so a dismissal reads as a departure rather than a
+ *            jump-cut.
+ *
+ * **Arm on transition only.** These are keyed on `data-bbl-enter`, which the
+ * list sets on rows it knows to be new — so mounting forty settled rows fires
+ * zero animations, which is the difference between a panel that feels alive
+ * and one that flickers every time you open it.
+ */
+.bbl-row {
+  transition: transform 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.bbl-row[data-bbl-enter="spring"] {
+  animation: bbl-arrive 320ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.bbl-row[data-bbl-leave="true"] {
+  animation: bbl-leave 90ms ease-in forwards;
+}
+
+@keyframes bbl-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes bbl-leave {
+  to {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+/* Group headers do not animate their counts. A number that tweens is a number
+   that cannot be read while it is moving, and the whole point of the count is
+   to be read at a glance. */
+
+/*
+ * `prefers-reduced-motion` replaces every one of these with an instant swap —
+ * not a shorter animation. Somebody who has asked for less motion has not asked
+ * for the same motion, faster.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .bbl-row,
+  .bbl-row[data-bbl-enter],
+  .bbl-row[data-bbl-leave] {
+    animation: none;
+    transition: none;
+  }
+  .bbl-stack-card.bbl-tinted,
+  .bbl-row-meta,
+  .bbl-row-actions {
+    transition: none;
+  }
+  /* The skeleton stops pulsing rather than pulsing faster. Somebody who asked
+     for less motion did not ask for the same motion, sooner. */
+  .bbl-skeleton {
+    animation: none;
+  }
+}

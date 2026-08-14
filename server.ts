@@ -39,9 +39,12 @@ import {
   updateIssue,
   type MutationDeps,
 } from "./src/mutations.js";
-import { selectDetail } from "./src/select/detail.js";
+import { estimateLabel, estimateScale, selectDetail } from "./src/select/detail.js";
+import { initialsOf } from "./src/select/panel.js";
+import { toneForStateType } from "./src/select/tone.js";
 import { issueDetailText } from "./src/tools-format.js";
 import { applyIssueDetail } from "./src/sync/apply.js";
+import { resolveBinding, type LadderDeps } from "./src/binding.js";
 import { crossTeamRefusal, scopeFor } from "./src/bindings.js";
 import {
   classifyVerificationFailure,
@@ -239,7 +242,10 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       const since = now() - state.last;
       if (since >= PUBLISH_FLOOR_MS) {
         state.last = now();
-        lifetime.run("publish", () => bb.realtime.publish(channel, { at: state.last }));
+        lifetime.run("publish", () => {
+          if (channel === "linear:data") rebuildAllInstructions();
+          bb.realtime.publish(channel, { at: state.last });
+        });
         return;
       }
       // Trailing rather than dropping: the last event in a burst is the one
@@ -248,7 +254,10 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       state.timer = setTimeout(() => {
         state.timer = null;
         state.last = now();
-        lifetime.run("publish", () => bb.realtime.publish(channel, { at: state.last }));
+        lifetime.run("publish", () => {
+          if (channel === "linear:data") rebuildAllInstructions();
+          bb.realtime.publish(channel, { at: state.last });
+        });
       }, PUBLISH_FLOOR_MS - since);
     }
 
@@ -538,11 +547,27 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     bb.events.on("thread.active", ({ thread }) => {
       activeThreads.add(thread.id);
       if (store.threadLink(thread.id) !== null) publish("linear:data");
+      lifetime.detach("binding", async () => {
+        await evaluateThreadBinding(thread.id, []);
+      });
     });
-    for (const event of ["thread.idle", "thread.failed", "thread.archived", "thread.deleted"] as const) {
+    bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
+      activeThreads.delete(thread.id);
+      if (store.threadLink(thread.id) !== null) publish("linear:data");
+      // The idle event carries the last assistant text for free — the one
+      // message most likely to say which issue the work turned out to be.
+      lifetime.detach("binding", async () => {
+        await evaluateThreadBinding(thread.id, lastAssistantText === null ? [] : [lastAssistantText]);
+      });
+    });
+    for (const event of ["thread.failed", "thread.archived", "thread.deleted"] as const) {
       bb.events.on(event, ({ thread }) => {
         activeThreads.delete(thread.id);
         if (store.threadLink(thread.id) !== null) publish("linear:data");
+        if (event !== "thread.failed") {
+          suggestions.delete(thread.id);
+          instructionCache.delete(thread.id);
+        }
       });
     }
 
@@ -1583,6 +1608,205 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * and the start-thread deps (M8) were cut with their surfaces; each
      * returns with its milestone. */
 
+    /* ── The binding ladder (M3) ─────────────────────────────────────────── */
+
+    /** The fuzzy rung's candidate per thread. In memory on purpose: a
+     *  suggestion is a hint, and a hint that survives a restart outlives its
+     *  evidence. */
+    const suggestions = new Map<
+      string,
+      { issueId: string; identifier: string; title: string }
+    >();
+
+    /** What `contributeInstructions` serves. That hook is synchronous and on
+     *  the thread-start path, so the strings are prebuilt here and only ever
+     *  *read* there. */
+    const instructionCache = new Map<string, string>();
+
+    /**
+     * Issues this thread said "not that one" to.
+     *
+     * A manual unlink must stick: without this, the next thread event re-runs
+     * the ladder and the branch rung re-binds the exact issue the user just
+     * removed. In memory — a restart forgets declines, which errs toward
+     * re-offering, and re-offering is one click to decline again.
+     */
+    const declined = new Map<string, Set<string>>();
+
+    function ladderDeps(readTeamIds: ReadonlySet<string>, threadId: string): LadderDeps {
+      const declinedHere = declined.get(threadId) ?? new Set<string>();
+      return {
+        threadLink: (id) => store.threadLink(id),
+        issuesByBranch: (branch) =>
+          store.issuesByBranch(branch).filter((issue) => !declinedHere.has(issue.id)),
+        issueByIdentifier: (identifier) => {
+          const issue = store.issueByIdentifier(identifier);
+          return issue !== null && declinedHere.has(issue.id) ? null : issue;
+        },
+        openIssues: () =>
+          store
+            .queryIssues({
+              teamIds: [...readTeamIds],
+              includeCompleted: false,
+              sort: "updated",
+              limit: 200,
+            })
+            .filter((issue) => !declinedHere.has(issue.id))
+            .map((issue) => ({
+              id: issue.id,
+              identifier: issue.identifier,
+              title: issue.title,
+              teamId: issue.teamId,
+            })),
+        readTeamIds,
+      };
+    }
+
+    async function evaluateThreadBinding(
+      threadId: string,
+      extraTexts: readonly string[],
+    ): Promise<void> {
+      const thread = await lifetime.runAsync(
+        "thread",
+        () => bb.sdk.threads.get({ threadId }),
+        null,
+      );
+      if (thread === null) return;
+
+      const projectId = thread.projectId ?? null;
+      const scope = projectId === null ? null : scopeFor(projectId, bindingSnapshot);
+      const readTeamIds = new Set(scope?.readTeamIds ?? []);
+      if (readTeamIds.size === 0) {
+        suggestions.delete(threadId);
+        rebuildInstruction(threadId);
+        return;
+      }
+
+      let branchName: string | null = null;
+      const environmentId = thread.environmentId ?? null;
+      if (environmentId !== null) {
+        const environment = await lifetime.runAsync(
+          "environment",
+          () => bb.sdk.environments.get({ environmentId }),
+          null,
+        );
+        branchName = environment?.branchName ?? null;
+      }
+
+      const title = thread.title ?? null;
+      const outcome = resolveBinding(ladderDeps(readTeamIds, threadId), {
+        threadId,
+        branchName,
+        texts: [title ?? "", ...extraTexts],
+        title,
+      });
+
+      if (outcome.kind === "bound") {
+        if (outcome.isNew) {
+          store.linkThread({
+            threadId,
+            issueId: outcome.issueId,
+            teamId: outcome.teamId,
+            projectId,
+            createdAt: now(),
+            origin: outcome.origin,
+          });
+          suggestions.delete(threadId);
+          publish("linear:data");
+        }
+      } else if (outcome.kind === "suggestion") {
+        const previous = suggestions.get(threadId);
+        suggestions.set(threadId, {
+          issueId: outcome.issueId,
+          identifier: outcome.identifier,
+          title: outcome.title,
+        });
+        if (previous?.issueId !== outcome.issueId) publish("linear:data");
+      } else if (suggestions.delete(threadId)) {
+        publish("linear:data");
+      }
+      rebuildInstruction(threadId);
+    }
+
+    /** The per-turn sentence an agent gets about its thread's issue: what it
+     *  is, where it stands, how it was bound, and the three commands that
+     *  matter — so the task follows the thread with zero tool calls. */
+    function rebuildInstruction(threadId: string): void {
+      const link = store.threadLink(threadId);
+      if (link === null) {
+        instructionCache.delete(threadId);
+        return;
+      }
+      const issue = store.issue(link.issueId);
+      if (issue === null) {
+        instructionCache.delete(threadId);
+        return;
+      }
+      const state = store
+        .workflowStates(issue.teamId)
+        .find((entry) => entry.id === issue.stateId);
+      instructionCache.set(
+        threadId,
+        [
+          `This thread is working on Linear issue ${issue.identifier} — "${issue.title}"`,
+          `(state: ${state?.name ?? "unknown"}; bound via ${link.origin}).`,
+          `Read it with \`bb linear issue ${issue.identifier} --comments\`;`,
+          `comment with \`bb linear comment ${issue.identifier} -- <text>\`;`,
+          `move it with \`bb linear move ${issue.identifier} <state-name-or-type>\`.`,
+        ].join(" "),
+      );
+    }
+
+    /** Re-derive every cached sentence from the mirror. Called from the
+     *  throttled publish path, so a state change reaches the next turn's
+     *  context without a per-turn database read. */
+    function rebuildAllInstructions(): void {
+      for (const threadId of [...instructionCache.keys()]) rebuildInstruction(threadId);
+    }
+
+    bb.agents.contributeInstructions(({ threadId }) =>
+      threadId === undefined || threadId === null
+        ? null
+        : (instructionCache.get(threadId) ?? null),
+    );
+
+    function bindManually(
+      threadId: string,
+      issueId: string | null,
+      projectId: string | null,
+    ): { ok: boolean; message: string | null } {
+      if (issueId === null) {
+        const existing = store.threadLink(threadId);
+        if (existing !== null) {
+          const set = declined.get(threadId) ?? new Set<string>();
+          set.add(existing.issueId);
+          declined.set(threadId, set);
+        }
+        store.unlinkThread(threadId);
+        suggestions.delete(threadId);
+        instructionCache.delete(threadId);
+        publish("linear:data");
+        return { ok: true, message: "Unlinked." };
+      }
+      const issue = store.issue(issueId) ?? store.issueByIdentifier(issueId);
+      if (issue === null) {
+        return { ok: false, message: `No issue called ${issueId} in the local copy.` };
+      }
+      declined.get(threadId)?.delete(issue.id);
+      store.linkThread({
+        threadId,
+        issueId: issue.id,
+        teamId: issue.teamId,
+        projectId,
+        createdAt: now(),
+        origin: "manual",
+      });
+      suggestions.delete(threadId);
+      rebuildInstruction(threadId);
+      publish("linear:data");
+      return { ok: true, message: `Linked to ${issue.identifier}.` };
+    }
+
     /* ── Registrations ───────────────────────────────────────────────────── */
 
     bb.rpc.register(serverRpcContract, {
@@ -1611,6 +1835,176 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             };
           }),
         };
+      },
+
+      async threadIssue({ threadId }) {
+        const link = store.threadLink(threadId);
+        if (link !== null) {
+          const issue = store.issue(link.issueId);
+          if (issue !== null) {
+            const states = store.workflowStates(issue.teamId);
+            const state = states.find((entry) => entry.id === issue.stateId) ?? null;
+            return {
+              binding: {
+                issueId: issue.id,
+                identifier: issue.identifier,
+                title: issue.title,
+                stateName: state?.name ?? "Unknown state",
+                tone: toneForStateType(state?.type),
+                url: issue.url,
+                origin: link.origin,
+                stateOptions: [...states]
+                  .sort((a, b) => a.position - b.position)
+                  .map((entry) => ({
+                    id: entry.id,
+                    name: entry.name,
+                    type: entry.type,
+                    tone: toneForStateType(entry.type),
+                  })),
+              },
+              suggestion: null,
+            };
+          }
+        }
+        // Unbound: kick an evaluation so a chip mounted on a fresh thread
+        // converges without waiting for the next lifecycle event.
+        lifetime.detach("binding", async () => {
+          await evaluateThreadBinding(threadId, []);
+        });
+        const suggestion = suggestions.get(threadId) ?? null;
+        return { binding: null, suggestion };
+      },
+
+      async bindThread({ threadId, issueId }) {
+        const thread = await lifetime.runAsync(
+          "thread",
+          () => bb.sdk.threads.get({ threadId }),
+          null,
+        );
+        return bindManually(threadId, issueId, thread?.projectId ?? null);
+      },
+
+      async issue({ id }) {
+        return { result: await detailFor(id) };
+      },
+
+      async updateIssue(params) {
+        const issue = store.issue(params.id) ?? store.issueByIdentifier(params.id);
+        if (issue === null) {
+          return { ok: false, message: `No issue called ${params.id}.` };
+        }
+        try {
+          await updateIssue(
+            mutations,
+            issue.id,
+            {
+              ...(params.stateId === undefined ? {} : { stateId: params.stateId }),
+              ...(params.assigneeId === undefined ? {} : { assigneeId: params.assigneeId }),
+              ...(params.priority === undefined ? {} : { priority: params.priority }),
+              ...(params.estimate === undefined ? {} : { estimate: params.estimate }),
+              ...(params.dueDate === undefined ? {} : { dueDate: params.dueDate }),
+              ...(params.projectId === undefined ? {} : { projectId: params.projectId }),
+              ...(params.cycleId === undefined ? {} : { cycleId: params.cycleId }),
+              ...(params.milestoneId === undefined ? {} : { milestoneId: params.milestoneId }),
+              ...(params.title === undefined ? {} : { title: params.title }),
+              ...(params.description === undefined ? {} : { description: params.description }),
+              ...(params.addLabelIds === undefined ? {} : { addLabelIds: params.addLabelIds }),
+              ...(params.removeLabelIds === undefined
+                ? {}
+                : { removeLabelIds: params.removeLabelIds }),
+            },
+            `${issue.identifier} wasn't changed`,
+          );
+          return { ok: true, message: null };
+        } catch (error) {
+          return { ok: false, message: describeError(error) };
+        }
+      },
+
+      /**
+       * The lists a picker offers, for one issue's team — read entirely from
+       * the mirror. Opening a dropdown must not wait on Linear.
+       */
+      async editorOptions({ issueId }) {
+        const issue = store.issue(issueId) ?? store.issueByIdentifier(issueId);
+        if (issue === null) {
+          return {
+            states: [],
+            members: [],
+            labels: [],
+            priorities: [],
+            projects: [],
+            cycles: [],
+            estimates: [],
+          };
+        }
+
+        const team = store.team(issue.teamId);
+        const estimationType = team?.estimationType ?? "notUsed";
+
+        return {
+          states: [...store.workflowStates(issue.teamId)]
+            .sort((a, b) => a.position - b.position)
+            .map((entry) => ({
+              id: entry.id,
+              name: entry.name,
+              type: entry.type,
+              tone: toneForStateType(entry.type),
+            })),
+
+          /*
+           * Only people who can actually be assigned. Linear refuses
+           * `issueUpdate` with "not a member" for anyone outside the issue's
+           * team — found by clicking one. The fallback is the workspace list,
+           * for the case where membership has never been read.
+           */
+          members: (() => {
+            const onTeam = new Set(store.teamMemberIds(issue.teamId));
+            const everyone = store.members().filter((entry) => entry.active && !entry.isApp);
+            return onTeam.size === 0
+              ? everyone
+              : everyone.filter((entry) => onTeam.has(entry.id));
+          })().map((entry) => ({
+            id: entry.id,
+            name: entry.displayName,
+            initials: initialsOf(entry.displayName || entry.name),
+            avatarUrl: entry.avatarUrl,
+            isMe: entry.isMe,
+          })),
+
+          labels: store
+            .labels([issue.teamId])
+            .filter((entry) => !entry.isGroup)
+            .map((entry) => ({ id: entry.id, name: entry.name, color: entry.color })),
+
+          priorities: store.priorityValues().map((entry) => ({
+            priority: entry.priority,
+            label: entry.label,
+          })),
+
+          projects: store
+            .projects([issue.teamId])
+            .map((entry) => ({ id: entry.id, name: entry.name })),
+
+          cycles: store.cycles(issue.teamId).map((entry) => ({
+            id: entry.id,
+            name: entry.name ?? `Cycle ${String(entry.number)}`,
+          })),
+
+          estimates: estimateScale(estimationType, {
+            allowZero: team?.estimationAllowZero ?? false,
+            extended: team?.estimationExtended ?? false,
+          }).map((value) => ({ value, label: estimateLabel(value, estimationType) })),
+        };
+      },
+
+      async comment({ issueId, body }) {
+        try {
+          await postComment(mutations, { issueId, body, clientId: clientId() });
+          return { ok: true, message: null };
+        } catch (error) {
+          return { ok: false, message: describeError(error) };
+        }
       },
     });
 
@@ -2277,13 +2671,38 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
 
       start: async () => ({
         ok: false,
-        message: "Starting a thread from an issue arrives with M8. Until then: open the issue in Linear, or start the thread yourself and it will bind by branch name once M3 lands.",
+        message: "Starting a thread from an issue arrives with M8. Until then, start the thread and link it: bb linear link <KEY-n>.",
       }),
 
-      link: async () => ({
-        ok: false,
-        message: "Thread↔issue binding arrives with M3.",
-      }),
+      link: async ({ identifier, threadId }) => {
+        if (threadId === undefined) {
+          // `run` executes on the server, so there is no ambient "current
+          // thread" — the invoking CLI supplies one when it knows one.
+          return {
+            ok: false,
+            message: "No thread to link. Run this from a thread, or pass --thread <id>.",
+          };
+        }
+        if (identifier === null) {
+          const result = bindManually(threadId, null, null);
+          return { ok: result.ok, message: result.message ?? "Unlinked." };
+        }
+        let issue = store.issue(identifier) ?? store.issueByIdentifier(identifier);
+        if (issue === null) {
+          issue = await lifetime.runAsync("issue", () => refreshIssue(identifier), null);
+        }
+        if (issue === null) return { ok: false, message: `No issue called ${identifier}.` };
+        const thread = await lifetime.runAsync(
+          "thread",
+          () => bb.sdk.threads.get({ threadId }),
+          null,
+        );
+        const result = bindManually(threadId, issue.id, thread?.projectId ?? null);
+        return {
+          ok: result.ok,
+          message: result.message ?? `Linked this thread to ${issue.identifier}.`,
+        };
+      },
 
       now,
     };

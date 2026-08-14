@@ -167,7 +167,7 @@ export interface CommentRow {
   readonly resolvedAt: number | null;
 }
 
-export type ThreadLinkOrigin = "spawn" | "manual" | "branch";
+export type ThreadLinkOrigin = "spawn" | "manual" | "branch" | "message";
 
 export interface ThreadLinkRow {
   readonly threadId: string;
