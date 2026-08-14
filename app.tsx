@@ -8,6 +8,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { LinearDirective } from "./app/Directive.js";
 import { HeaderChip } from "./app/HeaderChip.js";
 import { IssuePanel } from "./app/IssuePanel.js";
 import { LinearPanel } from "./app/Panel.js";
@@ -115,6 +116,16 @@ export default definePluginApp((app) => {
         });
       }
     },
+  });
+
+  /*
+   * `::linear{key="ENG-42"}` in an assistant message renders as the issue —
+   * glyph, identifier, title — and opens the side panel on click. Unknown or
+   * malformed keys degrade to the original text, never to an empty box.
+   */
+  app.slots.messageDirective({
+    id: "linear",
+    component: LinearDirective,
   });
 
   app.slots.sidebarFooterAction({

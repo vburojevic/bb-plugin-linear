@@ -51,7 +51,9 @@ import { estimateLabel, estimateScale, selectDetail } from "./src/select/detail.
 import { initialsOf } from "./src/select/panel.js";
 import { toneForStateType } from "./src/select/tone.js";
 import { issueDetailText } from "./src/tools-format.js";
+import { registerMentionProviders } from "./src/mentions.js";
 import { registerTools } from "./src/tools.js";
+import { runPrTransition, type PrRunnerDeps } from "./src/automations/pr-runner.js";
 import { applyIssueDetail, toIssueInput } from "./src/sync/apply.js";
 import type { IssueNode } from "./src/linear/types.js";
 import { resolveBinding, type LadderDeps } from "./src/binding.js";
@@ -559,6 +561,10 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       if (store.threadLink(thread.id) !== null) publish("linear:data");
       lifetime.detach("binding", async () => {
         await evaluateThreadBinding(thread.id, []);
+        // After the ladder, so a binding this very event created (a fresh
+        // branch checkout, say) triggers the move in the same beat.
+        await moveStartedForThread(thread.id);
+        await runTransitionForThread(thread.id);
       });
     });
     bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
@@ -568,6 +574,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // message most likely to say which issue the work turned out to be.
       lifetime.detach("binding", async () => {
         await evaluateThreadBinding(thread.id, lastAssistantText === null ? [] : [lastAssistantText]);
+        await runTransitionForThread(thread.id);
       });
     });
     for (const event of ["thread.failed", "thread.archived", "thread.deleted"] as const) {
@@ -1634,9 +1641,163 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       return sent;
     }
 
-    /* The pull-request transition runner (M7), the thread-issue view (M3)
-     * and the start-thread deps (M8) were cut with their surfaces; each
-     * returns with its milestone. */
+    /* ── Write-back automations (M7) — OFF by default ────────────────────── */
+    /*
+     * Both automations are opt-in settings that default to false: agents with
+     * a Linear connection often drive states themselves, and two writers
+     * fighting over one card is worse than either alone. When on, targets
+     * come from the team's own Linear git-automation configuration — fetched
+     * here, cached in the mirror — so the plugin never invents a transition.
+     */
+
+    const automationFetched = new Set<string>();
+
+    /** Fetch the team's git-automation config once per load, lazily, right
+     *  before the first transition that would read it. A team with none
+     *  configured still gets an (empty) row set, and the runner's typed
+     *  fallbacks — merge ⇒ the earliest completed state — carry from there. */
+    async function ensureAutomationConfig(teamId: string): Promise<void> {
+      if (automationFetched.has(teamId)) return;
+      automationFetched.add(teamId);
+      try {
+        const result = await clientForTeam(teamId).teamAutomation(teamId, {
+          initiator: "background",
+        });
+        const states = result.team?.gitAutomationStates?.nodes ?? [];
+        store.replaceGitAutomation(
+          teamId,
+          states.map((node) => ({
+            id: node.id,
+            teamId,
+            event: node.event,
+            stateId: node.state?.id ?? null,
+            stateName: node.state?.name ?? null,
+            targetBranchPattern: node.targetBranch?.branchPattern ?? null,
+            targetBranchIsRegex: node.targetBranch?.isRegex ?? false,
+          })),
+        );
+      } catch (error) {
+        // Absent config is a working default, so a failed fetch must not
+        // block the transition — it only costs fidelity, not correctness.
+        automationFetched.delete(teamId);
+        lifetime.log("debug", `Could not read git automation for ${teamId}: ${describeError(error)}`);
+      }
+    }
+
+    async function prDepsNow(): Promise<PrRunnerDeps> {
+      const slots = await activeSlots();
+      return {
+        clients: slots.map((entry) => clientForSlot(entry.slot)),
+        clientForIssue: (issueId) => {
+          const issue = store.issue(issueId);
+          return issue === null ? client : clientForTeam(issue.teamId);
+        },
+        store,
+        mutations,
+        now,
+        log: (level, message) => lifetime.log(level, message),
+        lookupPullRequest: (environmentId) =>
+          bb.sdk.environments.pullRequest({ environmentId }) as never,
+      };
+    }
+
+    /** Runs on `thread.active` and `thread.idle` for threads whose
+     *  environment has a branch. Never in a tight loop — the lookup shells
+     *  out to `gh`. */
+    async function runTransitionForThread(threadId: string): Promise<void> {
+      const values = await settings.get();
+      if (!values.prTransitions) return;
+
+      const thread = await bb.sdk.threads.get({ threadId });
+      const environmentId = thread.environmentId;
+      if (environmentId === null || environmentId === undefined) return;
+
+      const environment = await bb.sdk.environments.get({ environmentId });
+      const projectId = thread.projectId ?? null;
+      const scope = projectId === null ? null : scopeFor(projectId, bindingSnapshot);
+
+      const link = store.threadLink(threadId);
+      if (link !== null) await ensureAutomationConfig(link.teamId);
+
+      const outcome = await runPrTransition(await prDepsNow(), {
+        environmentId,
+        branchName: environment.branchName ?? null,
+        enabled: true,
+        canWrite: (teamId) => scope !== null && scope.writeTeamIds.includes(teamId),
+        // The completed state is identifiable by `type`, which is what makes
+        // this fallback safe in any language.
+        completedStateId: (teamId) =>
+          store
+            .workflowStates(teamId)
+            .filter((state) => state.type === "completed")
+            .sort((a, b) => a.position - b.position)[0]?.id ?? null,
+      });
+
+      if (outcome.kind === "moved") {
+        lastMutationAt = now();
+        lastChangeAt = now();
+        publish("linear:data");
+      }
+    }
+
+    /**
+     * Bound + actively working ⇒ the team's started state.
+     *
+     * Lifts only forward, from triage/backlog/unstarted — a thread resuming
+     * on an issue already in review must never demote it. The target is the
+     * team's own `start` automation state where one is configured, else its
+     * earliest started-type column.
+     */
+    async function moveStartedForThread(threadId: string): Promise<void> {
+      const values = await settings.get();
+      if (!values.threadMovesStatus) return;
+
+      const link = store.threadLink(threadId);
+      if (link === null) return;
+      const issue = store.issue(link.issueId);
+      if (issue === null) return;
+
+      const scope = link.projectId === null ? null : scopeFor(link.projectId, bindingSnapshot);
+      if (scope === null || !scope.writeTeamIds.includes(issue.teamId)) return;
+
+      const states = store.workflowStates(issue.teamId);
+      const current = states.find((state) => state.id === issue.stateId);
+      if (
+        current !== undefined &&
+        current.type !== "triage" &&
+        current.type !== "backlog" &&
+        current.type !== "unstarted"
+      ) {
+        return;
+      }
+
+      await ensureAutomationConfig(issue.teamId);
+      const configured = store
+        .gitAutomation(issue.teamId)
+        .find((row) => row.event === "start" && row.stateId !== null);
+      const targetId =
+        configured?.stateId ??
+        states
+          .filter((state) => state.type === "started")
+          .sort((a, b) => a.position - b.position)[0]?.id ??
+        null;
+      if (targetId === null || targetId === issue.stateId) return;
+
+      try {
+        await updateIssue(
+          mutations,
+          issue.id,
+          { stateId: targetId },
+          `${issue.identifier} wasn't moved`,
+        );
+        lastMutationAt = now();
+        lastChangeAt = now();
+        publish("linear:data");
+        lifetime.log("info", `${issue.identifier} → started: a bound thread began working on it.`);
+      } catch (error) {
+        lifetime.log("debug", `Thread-start move skipped: ${describeError(error)}`);
+      }
+    }
 
     /* ── The binding ladder (M3) ─────────────────────────────────────────── */
 
@@ -3063,6 +3224,8 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * per thread whether any of them are offered, and an unbound project gets
      * none of them plus one sentence saying why.
      */
+    registerMentionProviders(bb, { store, bindings: () => bindingSnapshot });
+
     registerTools(bb, {
       store,
       bindings: () => bindingSnapshot,

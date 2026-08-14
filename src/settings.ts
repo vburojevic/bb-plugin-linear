@@ -117,9 +117,16 @@ export const SETTING_DESCRIPTORS = {
   prTransitions: {
     type: "boolean",
     label: "Move the issue when its pull request moves",
-    default: true,
+    default: false,
     description:
-      "Follow the git automation your team already configured in Linear. Needs the GitHub CLI (gh) authenticated on the machine running bb; nothing else in this plugin does.",
+      "Follow the git automation your team already configured in Linear, using the team's own target states. OFF by default: agents with a Linear connection often drive states themselves, and two writers fighting over one card is worse than either alone. Needs the GitHub CLI (gh) authenticated on the machine running bb; nothing else in this plugin does.",
+  },
+  threadMovesStatus: {
+    type: "boolean",
+    label: "Move the issue when a bound thread starts working",
+    default: false,
+    description:
+      "When a thread bound to an issue becomes active, lift the issue from backlog/triage/unstarted into the team's started state — never backwards, and only when this project's binding can write to that team. OFF by default, for the same reason as pull-request moves.",
   },
 
   notifyAssigned: {
