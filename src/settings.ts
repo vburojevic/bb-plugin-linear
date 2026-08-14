@@ -66,6 +66,26 @@ export const SETTING_DESCRIPTORS = {
     description: "As above. Leave empty unless you need it.",
   },
 
+  /*
+   * The master consent switch, and deliberately the only one that matters —
+   * declared right after the keys, because the host renders descriptors in
+   * declaration order and a consent switch buried under webhook and cadence
+   * tuning is a consent switch nobody finds.
+   *
+   * Off means the plugin cannot change anything in Linear — not an issue, not
+   * a comment, not a webhook registration — no matter what any other setting,
+   * tool, command, automation or UI control says. The enforcement lives in
+   * the transport (the one door every mutation leaves through), so a surface
+   * added later is gated the day it is written. Reads are untouched.
+   */
+  allowWrites: {
+    type: "boolean",
+    label: "Allow changes to Linear",
+    default: false,
+    description:
+      "Off by default: the plugin reads freely (issues, inbox, search all work) but refuses every change to Linear — issue edits, comments, new issues, attachments, webhook registration — until you turn this on. The refusal always names this switch. Agent write access (below) only applies once this is on.",
+  },
+
   oauthClientId: {
     type: "string",
     label: "OAuth client ID",
@@ -112,23 +132,6 @@ export const SETTING_DESCRIPTORS = {
     default: true,
     description:
       "Move the issue into your team's own started state when you start a thread from it.",
-  },
-
-  /*
-   * The master consent switch, and deliberately the only one that matters.
-   *
-   * Off means the plugin cannot change anything in Linear — not an issue, not
-   * a comment, not a webhook registration — no matter what any other setting,
-   * tool, command, automation or UI control says. The enforcement lives in
-   * the transport (the one door every mutation leaves through), so a surface
-   * added later is gated the day it is written. Reads are untouched.
-   */
-  allowWrites: {
-    type: "boolean",
-    label: "Allow changes to Linear",
-    default: false,
-    description:
-      "Off by default: the plugin reads freely (issues, inbox, search all work) but refuses every change to Linear — issue edits, comments, new issues, attachments, webhook registration — until you turn this on. The refusal always names this switch. Agent write access (below) only applies once this is on.",
   },
 
   prTransitions: {
