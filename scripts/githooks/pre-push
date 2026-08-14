@@ -1,0 +1,9 @@
+#!/bin/sh
+# The repo has no CI by choice; this hook is the machine-local equivalent.
+# Every push runs the same gate a CI would: typecheck, then the full suite.
+# Bypass for a genuine emergency with: git push --no-verify
+set -e
+echo "pre-push: typecheck"
+npx tsc --noEmit
+echo "pre-push: tests"
+npx vitest run --silent
