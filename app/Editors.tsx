@@ -270,7 +270,13 @@ export function PropertyEditors({
         <DropdownMenu onOpenChange={(open) => { if (open) options.want(); }}>
           <Trigger busy={busy} empty={detail.labels.length === 0}>
             {detail.labels.length === 0 ? (
-              "No labels"
+              <>
+                {/* The dots below ARE the glyph once there are labels; the tag
+                    only stands in for them while there are none, so the
+                    column keeps its shape. */}
+                <Icon name="Tag" className="size-3.5 shrink-0 opacity-60" aria-hidden />
+                <span>No labels</span>
+              </>
             ) : (
               <span className="flex min-w-0 items-center gap-1">
                 {detail.labels.slice(0, 3).map((label) => (
@@ -345,6 +351,7 @@ export function PropertyEditors({
       <Row label="Project">
         <DropdownMenu onOpenChange={(open) => { if (open) options.want(); }}>
           <Trigger busy={busy} empty={fields.projectId === null}>
+            <Icon name="Folder" className="size-3.5 shrink-0 opacity-60" aria-hidden />
             <span className="truncate">{fields.projectName ?? "No project"}</span>
           </Trigger>
           <DropdownMenuContent align="start" className="w-56">
@@ -377,6 +384,7 @@ export function PropertyEditors({
       <Row label="Cycle">
         <DropdownMenu onOpenChange={(open) => { if (open) options.want(); }}>
           <Trigger busy={busy} empty={fields.cycleId === null}>
+            <Icon name="Repeat" className="size-3.5 shrink-0 opacity-60" aria-hidden />
             <span className="truncate">{fields.cycleName ?? "No cycle"}</span>
           </Trigger>
           <DropdownMenuContent align="start" className="w-48">
@@ -516,21 +524,81 @@ function Avatar({
  * thing distinguishing five otherwise identical menu items at a glance.
  */
 function PriorityMark({ priority }: { priority: number }) {
+  // Every level draws something. In a *list* a mark on every row is noise —
+  // that rule still governs the panel's rows — but this is a labelled
+  // property beside Assignee's avatar and Due's calendar, so a level with no
+  // glyph does not read as "quiet", it reads as broken.
+  //
+  // Linear's own vocabulary: three ascending bars, filled as far as the level
+  // goes, with unreached bars left faint so all four bar states share one
+  // silhouette and differ only in fill. Urgent breaks the pattern on purpose
+  // — it is the one that should not look like "more of the same".
+  const bars = (filled: number) => (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      className="bbl-neutral bbl-text w-3.5 shrink-0"
+      aria-hidden
+      focusable="false"
+    >
+      {[
+        { x: 2, y: 10, height: 4 },
+        { x: 6.5, y: 7, height: 7 },
+        { x: 11, y: 4, height: 10 },
+      ].map((bar, index) => (
+        <rect
+          key={bar.x}
+          x={bar.x}
+          y={bar.y}
+          width="3"
+          height={bar.height}
+          rx="1"
+          fill="currentColor"
+          opacity={index < filled ? 1 : 0.3}
+        />
+      ))}
+    </svg>
+  );
+
   if (priority === 1) {
+    // Urgent: a filled square with the bar the others are missing — the only
+    // solid shape in the set, so it separates at a glance in a menu of five.
     return (
-      <span className="bbl-danger bbl-text w-3 shrink-0 text-center text-xs font-semibold" aria-hidden>
-        !!
-      </span>
+      <svg
+        viewBox="0 0 16 16"
+        width="14"
+        height="14"
+        className="bbl-danger bbl-text w-3.5 shrink-0"
+        aria-hidden
+        focusable="false"
+      >
+        <rect x="2" y="2" width="12" height="12" rx="3" fill="currentColor" />
+        <rect x="7.1" y="4.5" width="1.8" height="5" rx="0.9" fill="var(--background)" />
+        <rect x="7.1" y="10.6" width="1.8" height="1.9" rx="0.9" fill="var(--background)" />
+      </svg>
     );
   }
-  if (priority === 2) {
-    return (
-      <span className="bbl-triage bbl-text w-3 shrink-0 text-center text-xs font-semibold" aria-hidden>
-        !
-      </span>
-    );
-  }
-  return <span className="w-3 shrink-0" aria-hidden />;
+  if (priority === 2) return bars(3); // High
+  if (priority === 3) return bars(2); // Medium
+  if (priority === 4) return bars(1); // Low
+
+  // No priority: dashes rather than empty bars, because "none" is a different
+  // statement from "the lowest one".
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      width="14"
+      height="14"
+      className="bbl-neutral bbl-text w-3.5 shrink-0"
+      aria-hidden
+      focusable="false"
+    >
+      {[2, 6.5, 11].map((x) => (
+        <rect key={x} x={x} y="7.25" width="3" height="1.5" rx="0.75" fill="currentColor" />
+      ))}
+    </svg>
+  );
 }
 
 export { DropdownMenuLabel };
