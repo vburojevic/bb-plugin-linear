@@ -1,61 +1,115 @@
-// bb-plugin-linear — a BB plugin backend entry.
-//
-// The default export is a factory that receives the plugin API. BB supplies
-// the tiny defineRpcContract runtime helper; the API type remains type-only.
+// bb-plugin-linear — backend entry. Wiring only: every behavior lives in a
+// pure module under src/ where a test can reach it without a host.
 import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
 import { z } from "zod";
+import { createAccounts, type Accounts } from "./src/accounts.js";
+import { runCli } from "./src/cli.js";
+import { describeError } from "./src/linear/errors.js";
+import { forgetSecrets } from "./src/linear/errors.js";
+import { SETTING_DESCRIPTORS, type LinearSettings } from "./src/settings.js";
 
 export const rpcContract = defineRpcContract({
-  greeting: {
+  status: {
     input: z.null(),
-    output: z.object({ greeting: z.string(), loadCount: z.number().int() }),
+    output: z.object({
+      configured: z.boolean(),
+      accounts: z.array(
+        z.object({
+          slot: z.number(),
+          orgName: z.string().nullable(),
+          orgUrlKey: z.string().nullable(),
+          displayName: z.string().nullable(),
+          email: z.string().nullable(),
+          error: z.string().nullable(),
+        }),
+      ),
+    }),
   },
 });
 
 export default async function plugin(bb: BbPluginApi) {
-  bb.log.info("loaded");
+  const settings = bb.settings.define(SETTING_DESCRIPTORS);
 
-  // Declarative settings — rendered in BB's settings UI and editable with
-  // `bb plugin config linear`. Add `secret: true` for values like API keys.
-  const settings = bb.settings.define({
-    greeting: { type: "string", label: "Greeting", default: "hello" },
-  });
-  const { greeting } = await settings.get();
-
-  // Namespaced key-value storage in bb.db (JSON values, up to 256KB each).
-  // For bigger or relational data use bb.storage.database().
-  const loadCount = ((await bb.storage.kv.get<number>("load-count")) ?? 0) + 1;
-  await bb.storage.kv.set("load-count", loadCount);
-  bb.log.info(`${greeting} — load #${loadCount}`);
-
-  // Both schemas run at the wire boundary. Handler input/output are inferred
-  // from the shared contract; app.tsx imports only its type.
-  bb.rpc.register(rpcContract, {
-    greeting: () => ({ greeting, loadCount }),
-  });
-
-  // Cleanup on reload/disable/shutdown; hooks run LIFO. The sanctioned place
-  // to clear timers and close connections.
+  const lifetime = new AbortController();
   bb.onDispose(() => {
-    bb.log.info("disposed");
+    lifetime.abort();
+    forgetSecrets();
   });
 
-  // Long-lived background work: starts after load, gets an AbortSignal on
-  // reload/disable/shutdown, and restarts with backoff if it crashes. Sleeps
-  // must wake on abort — a plain setTimeout sleeps through the stop window
-  // and the plugin reports "degraded (service did not stop)" on reload.
-  // bb.background.service("worker", {
-  //   async start(signal) {
-  //     while (!signal.aborted) {
-  //       await new Promise((resolve) => {
-  //         const timer = setTimeout(resolve, 60_000);
-  //         signal.addEventListener(
-  //           "abort",
-  //           () => { clearTimeout(timer); resolve(undefined); },
-  //           { once: true },
-  //         );
-  //       });
-  //     }
-  //   },
-  // });
+  const accounts: Accounts = createAccounts({
+    getSettings: (): Promise<LinearSettings> => settings.get(),
+    log: (level, message) => bb.log[level](message),
+    signal: lifetime.signal,
+  });
+
+  // Unconfigured is a described state, not an error: the plugin loads, the
+  // settings form renders, and the first saved key auto-retries the load.
+  const initial = await settings.get();
+  const hasAnyKey = [
+    initial.apiKey,
+    initial.apiKey2,
+    initial.apiKey3,
+    initial.apiKey4,
+  ].some((value) => (value ?? "").trim() !== "");
+  if (!hasAnyKey) {
+    bb.status.needsConfiguration(
+      "Add your Linear API key in this plugin's settings, or run: bb plugin config linear set apiKey <key>",
+    );
+  }
+
+  bb.rpc.register(rpcContract, {
+    async status() {
+      const configured = await accounts.configuredSlots();
+      const rows = [];
+      for (const slot of configured) {
+        try {
+          // Cached unless the key changed — a settings page render must not
+          // spend a Linear request per paint.
+          const identity = await accounts.identity(slot);
+          rows.push({
+            slot,
+            orgName: identity.orgName,
+            orgUrlKey: identity.orgUrlKey,
+            displayName: identity.displayName,
+            email: identity.email,
+            error: null,
+          });
+        } catch (error) {
+          rows.push({
+            slot,
+            orgName: null,
+            orgUrlKey: null,
+            displayName: null,
+            email: null,
+            error: describeError(error),
+          });
+        }
+      }
+      return { configured: configured.length > 0, accounts: rows };
+    },
+  });
+
+  bb.cli.register({
+    name: "linear",
+    summary: "Linear issues, accounts and diagnostics",
+    commands: [
+      {
+        name: "doctor",
+        summary: "Connection, identity and budget, per key slot",
+        usage: "bb linear doctor",
+      },
+      {
+        name: "accounts",
+        summary: "The configured accounts, one line each",
+        usage: "bb linear accounts",
+      },
+      {
+        name: "create",
+        summary: "Create an issue",
+        usage:
+          "bb linear create --team <key-or-name> --title <title> [--description <markdown>] [--account <slot>]",
+      },
+    ],
+    run: (argv) => runCli(argv, { accounts }),
+  });
 }
