@@ -1,5 +1,5 @@
 import type { LinearClient } from "../linear/client.js";
-import { TEAM_PAGE_SIZE } from "../linear/documents.js";
+import { EXISTENCE_PAGE_SIZE, TEAM_PAGE_SIZE } from "../linear/documents.js";
 import type { Store } from "../store/store.js";
 import { describeError } from "../linear/errors.js";
 import { applyBootstrap, applyBreadth, applyIssues, applyTeamGraph } from "./apply.js";
@@ -24,9 +24,15 @@ import { applyBootstrap, applyBreadth, applyIssues, applyTeamGraph } from "./app
  *  bigger one. */
 export const BACKFILL_PAGE_LIMIT = 5;
 
+/** How many candidate ids one reconcile may put to Linear. Two batches is
+ *  plenty for ordinary churn; a bigger divergence is the next walk's job. */
+export const EXISTENCE_SWEEP_LIMIT = 200;
+
 export interface BackfillReport {
   readonly teams: number;
   readonly issues: number;
+  /** Issues deleted locally because Linear no longer has them. */
+  readonly removed: number;
   readonly truncated: boolean;
   /** Pages whose `hasNextPage` was true when the cap ran out — reported so
    *  the caller can say so rather than implying completeness. */
@@ -134,7 +140,7 @@ export async function backfillTeams(
   teamIds: readonly string[],
 ): Promise<BackfillReport> {
   if (teamIds.length === 0) {
-    return { teams: 0, issues: 0, truncated: false, moreAvailable: false };
+    return { teams: 0, issues: 0, removed: 0, truncated: false, moreAvailable: false };
   }
 
   await refreshTeamVocabulary(deps, teamIds);
@@ -155,12 +161,14 @@ export async function backfillTeams(
   let issues = 0;
   let moreAvailable = false;
   let pages = 0;
+  const seen = new Set<string>();
 
   for (; pages < BACKFILL_PAGE_LIMIT; pages += 1) {
     if (deps.signal?.aborted) break;
     const result = await deps.client.backfillIssues(teamIds, after, { initiator: "background" });
     const applied = applyIssues(deps.store, result.issues.nodes, deps.now());
     issues += applied.written;
+    for (const node of result.issues.nodes) seen.add(node.id);
 
     if (!result.issues.pageInfo.hasNextPage) break;
     const next = result.issues.pageInfo.endCursor ?? null;
@@ -177,5 +185,65 @@ export async function backfillTeams(
     );
   }
 
-  return { teams: teamIds.length, issues, truncated, moreAvailable: truncated };
+  const removed = truncated ? 0 : await sweepDeleted(deps, teamIds, seen);
+
+  return { teams: teamIds.length, issues, removed, truncated, moreAvailable: truncated };
+}
+
+/**
+ * Remove the issues Linear no longer has.
+ *
+ * Every write into the mirror is an upsert, so without this an issue deleted
+ * in Linear stays in the panel, in search and in every agent tool result
+ * forever — and the reader acts on a card that does not exist. Deletes leave
+ * no tombstone to sync, so absence is the only evidence there is.
+ *
+ * The walk above just read every OPEN issue of these teams. A local row that
+ * is open and was not seen is therefore one of two things: closed since the
+ * last walk (Linear still has it) or gone. Those are opposite outcomes, and
+ * the difference is not guessable — so the candidates are put to Linear
+ * directly, and only a genuine absence deletes.
+ *
+ * Runs only after a COMPLETE walk. A truncated one did not read every open
+ * issue, so "not seen" would mostly mean "not reached", and the sweep would
+ * delete live work.
+ */
+async function sweepDeleted(
+  deps: BackfillDeps,
+  teamIds: readonly string[],
+  seen: ReadonlySet<string>,
+): Promise<number> {
+  const candidates = deps.store
+    .queryIssues({ teamIds, includeCompleted: false, sort: "updated", limit: 1000 })
+    .filter((row) => !seen.has(row.id))
+    .map((row) => row.id);
+  if (candidates.length === 0) return 0;
+
+  let removed = 0;
+  // Bounded: a handful of probes, not a re-verification of the workspace. A
+  // larger divergence than this is what the next walk is for.
+  for (let index = 0; index < candidates.length && index < EXISTENCE_SWEEP_LIMIT; index += EXISTENCE_PAGE_SIZE) {
+    if (deps.signal?.aborted) break;
+    const batch = candidates.slice(index, index + EXISTENCE_PAGE_SIZE);
+    let live: ReadonlySet<string>;
+    try {
+      const result = await deps.client.issuesExist(batch, { initiator: "background" });
+      live = new Set(result.issues.nodes.map((node) => node.id));
+    } catch (error) {
+      // A failed probe proves nothing. Deleting on "we could not ask" would
+      // turn a rate limit into data loss.
+      deps.log?.("debug", `Existence check skipped: ${describeError(error)}`);
+      break;
+    }
+    const gone = batch.filter((id) => !live.has(id));
+    if (gone.length > 0) {
+      deps.store.deleteIssues(gone);
+      removed += gone.length;
+    }
+  }
+
+  if (removed > 0) {
+    deps.log?.("info", `Removed ${removed} issue(s) that no longer exist in Linear.`);
+  }
+  return removed;
 }

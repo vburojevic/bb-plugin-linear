@@ -6,6 +6,8 @@ import {
   ISSUE_DETAIL,
   ISSUE_UPDATE,
   ISSUES_BACKFILL,
+  ISSUES_EXIST,
+  EXISTENCE_PAGE_SIZE,
   ISSUE_PAGE_SIZE,
   TICK,
   LABEL_PAGE_SIZE,
@@ -122,6 +124,13 @@ export interface LinearClient {
     after: string | null,
     options?: CallOptions,
   ): Promise<IssuesResult>;
+
+  /** Which of these issue ids does Linear still have? A liveness probe for
+   *  the reconcile: it tells a closed issue apart from a deleted one. */
+  issuesExist(
+    ids: readonly string[],
+    options?: CallOptions,
+  ): Promise<{ issues: { nodes: readonly { id: string }[] } }>;
 
   /** One issue with everything the detail pane and a spawned thread need.
    *  Deliberately the same document for both, so the spawn path — the one
@@ -276,6 +285,12 @@ export const createLinearClient: LinearClientFactory = (session, options) => {
       transport.execute<IssuesResult>(
         ISSUES_BACKFILL,
         call(callOptions, { teamIds: [...teamIds], first: ISSUE_PAGE_SIZE, after }),
+      ),
+
+    issuesExist: (ids, callOptions) =>
+      transport.execute<{ issues: { nodes: readonly { id: string }[] } }>(
+        ISSUES_EXIST,
+        call(callOptions, { ids: [...ids], first: EXISTENCE_PAGE_SIZE }),
       ),
 
     issueDetail: (id, callOptions) =>

@@ -44,24 +44,130 @@ export async function runTick(deps: TickDeps, input: TickInput): Promise<TickOut
     tickNumber: input.tickNumber,
   });
 
-  let result: TickResult;
-  try {
-    result = await deps.client.tick(plan.variables, { initiator: "background" });
-  } catch (error) {
-    // A timeout, a dropped connection, a rate limit. The partial result — if
-    // there even is one — is thrown away and the next tick retries from the
-    // unchanged watermark. Writing a hollow snapshot as truth is how a panel
-    // ends up confidently wrong.
-    deps.log?.("debug", `Tick failed, discarding: ${describeError(error)}`);
-    if (isLinearError(error)) throw error;
-    return DISCARDED_TICK;
+  /*
+   * One tick may walk several pages.
+   *
+   * A single page was a terminal state, not a pause: the watermark refuses to
+   * advance on an incomplete walk (correctly — everything unread lies behind
+   * it), so a burst bigger than one page meant `hasNextPage` stayed true and
+   * the cursor never moved again. Following the cursor is what turns "there is
+   * more" into "then read the rest".
+   *
+   * Bounded, because a tick is background work sharing an hourly request
+   * budget with the person clicking: past the cap the walk stops, stays
+   * incomplete, keeps its watermark, and resumes on the next tick with the
+   * same cursor semantics. Progress every tick, never an unbounded one.
+   */
+  const at = deps.now();
+  let issuesAfter: string | null = null;
+  let commentsAfter: string | null = null;
+  let issuesComplete = false;
+  let commentsComplete = false;
+  let issuesWritten = 0;
+  let commentsWritten = 0;
+  let newestIssue: number | null = null;
+  let newestComment: number | null = null;
+
+  for (let page = 0; page < TICK_PAGE_LIMIT; page += 1) {
+    let result: TickResult;
+    try {
+      result = await deps.client.tick(
+        {
+          ...plan.variables,
+          // A connection that already finished is asked for nothing more; its
+          // cursor sits at the end and returns an empty page.
+          issuesAfter,
+          commentsAfter,
+        },
+        { initiator: "background" },
+      );
+    } catch (error) {
+      // A timeout, a dropped connection, a rate limit. The partial result — if
+      // there even is one — is thrown away. Pages already applied stay (every
+      // write is an upsert), but the walk is incomplete, so the watermark does
+      // not move and the next tick re-reads from the same place.
+      deps.log?.("debug", `Tick failed, discarding: ${describeError(error)}`);
+      if (isLinearError(error)) throw error;
+      return page === 0 ? DISCARDED_TICK : partialTick(issuesWritten, commentsWritten, input);
+    }
+
+    if (deps.signal?.aborted) {
+      return page === 0 ? DISCARDED_TICK : partialTick(issuesWritten, commentsWritten, input);
+    }
+
+    const pageIssues = applyIssues(deps.store, result.issues.nodes, at);
+    issuesWritten += pageIssues.written;
+    if (
+      pageIssues.newestUpdatedAt !== null &&
+      (newestIssue === null || pageIssues.newestUpdatedAt > newestIssue)
+    ) {
+      newestIssue = pageIssues.newestUpdatedAt;
+    }
+
+    const applied = applyCommentPage(deps, result, at);
+    commentsWritten += applied.written;
+    if (applied.newest !== null && (newestComment === null || applied.newest > newestComment)) {
+      newestComment = applied.newest;
+    }
+
+    issuesComplete = !result.issues.pageInfo.hasNextPage;
+    commentsComplete = !result.comments.pageInfo.hasNextPage;
+    if (issuesComplete && commentsComplete) break;
+
+    issuesAfter = result.issues.pageInfo.endCursor ?? issuesAfter;
+    commentsAfter = result.comments.pageInfo.endCursor ?? commentsAfter;
+    // A cursor that does not move would spin this loop against the budget.
+    if (!issuesComplete && result.issues.pageInfo.endCursor === null) break;
+    if (!commentsComplete && result.comments.pageInfo.endCursor === null) break;
   }
 
-  if (deps.signal?.aborted) return DISCARDED_TICK;
+  return {
+    applied: true,
+    issuesWritten,
+    commentsWritten,
+    changed: issuesWritten > 0 || commentsWritten > 0,
+    issuesWatermark: advanceWatermark(input.issuesWatermark, {
+      newestUpdatedAt: newestIssue,
+      complete: issuesComplete,
+    }),
+    commentsWatermark: advanceWatermark(input.commentsWatermark, {
+      newestUpdatedAt: newestComment,
+      complete: commentsComplete,
+    }),
+    issuesComplete,
+    commentsComplete,
+  };
+}
 
-  const at = deps.now();
-  const issues = applyIssues(deps.store, result.issues.nodes, at);
+/** How many pages one tick may walk. Five pages is 500 issues of change in a
+ *  single tick — far past a normal interval's churn, and a hard ceiling on
+ *  what background work can spend in one pass. */
+export const TICK_PAGE_LIMIT = 5;
 
+/** A walk that stopped early: the rows already applied are kept, but neither
+ *  watermark moves, so the next tick re-reads from the same place. */
+function partialTick(
+  issuesWritten: number,
+  commentsWritten: number,
+  input: TickInput,
+): TickOutcome {
+  return {
+    applied: true,
+    issuesWritten,
+    commentsWritten,
+    changed: issuesWritten > 0 || commentsWritten > 0,
+    issuesWatermark: input.issuesWatermark,
+    commentsWatermark: input.commentsWatermark,
+    issuesComplete: false,
+    commentsComplete: false,
+  };
+}
+
+function applyCommentPage(
+  deps: TickDeps,
+  result: TickResult,
+  at: number,
+): { written: number; newest: number | null } {
   const comments: CommentRow[] = result.comments.nodes.map((node) => ({
     id: node.id,
     issueId: node.issue?.id ?? "",
@@ -82,29 +188,12 @@ export async function runTick(deps: TickDeps, input: TickInput): Promise<TickOut
   );
   deps.store.putComments(attached);
 
-  let newestComment: number | null = null;
+  let newest: number | null = null;
   for (const comment of attached) {
-    if (newestComment === null || comment.updatedAt > newestComment) {
-      newestComment = comment.updatedAt;
-    }
+    if (newest === null || comment.updatedAt > newest) newest = comment.updatedAt;
   }
 
-  return {
-    applied: true,
-    issuesWritten: issues.written,
-    commentsWritten: attached.length,
-    changed: issues.written > 0 || attached.length > 0,
-    issuesWatermark: advanceWatermark(input.issuesWatermark, {
-      newestUpdatedAt: issues.newestUpdatedAt,
-      complete: !result.issues.pageInfo.hasNextPage,
-    }),
-    commentsWatermark: advanceWatermark(input.commentsWatermark, {
-      newestUpdatedAt: newestComment,
-      complete: !result.comments.pageInfo.hasNextPage,
-    }),
-    issuesComplete: !result.issues.pageInfo.hasNextPage,
-    commentsComplete: !result.comments.pageInfo.hasNextPage,
-  };
+  return { written: attached.length, newest };
 }
 
 /**

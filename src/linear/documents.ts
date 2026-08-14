@@ -371,6 +371,40 @@ const ISSUE_FIELDS = `fragment IssueFields on Issue {
  * `orderBy: updatedAt` so the rows that arrive first are the ones somebody
  * touched most recently, which is what the panel shows above the fold.
  */
+/** How many ids one existence check may carry. */
+export const EXISTENCE_PAGE_SIZE = 100;
+
+/**
+ * Which of these issues does Linear still have?
+ *
+ * The mirror is upsert-only, so an issue hard-deleted in Linear would live in
+ * the panel, in search and in every agent tool result forever — the reader
+ * acts on a card that no longer exists. The reconcile walk knows which issues
+ * it *expected* to see and did not; this answers whether each of those was
+ * merely closed (Linear still has it) or genuinely gone (Linear does not).
+ *
+ * `includeArchived: true` on purpose: archiving is reversible and an archived
+ * issue is still an issue. Only a real absence means deleted.
+ *
+ * Ids only — this is a liveness probe, not a fetch. The whole point is that
+ * it costs almost nothing to run on the tail of a walk that already happened.
+ */
+export const ISSUES_EXIST = doc(
+  "IssuesExist",
+  "query",
+  `query IssuesExist($ids: [ID!]!, $first: Int!) {
+  issues(first: $first, includeArchived: true, filter: { id: { in: $ids } }) {
+    nodes {
+      id
+    }
+    pageInfo {
+      hasNextPage
+    }
+  }
+}`,
+  { first: EXISTENCE_PAGE_SIZE },
+);
+
 export const ISSUES_BACKFILL = doc(
   "IssuesBackfill",
   "query",
@@ -586,9 +620,12 @@ export const TICK = doc(
   $commentsSince: DateTimeOrDuration!
   $issues: Int!
   $comments: Int!
+  $issuesAfter: String
+  $commentsAfter: String
 ) {
   issues(
     first: $issues
+    after: $issuesAfter
     orderBy: updatedAt
     includeArchived: true
     filter: { team: { id: { in: $teamIds } }, updatedAt: { gt: $issuesSince } }
@@ -603,6 +640,7 @@ export const TICK = doc(
   }
   comments(
     first: $comments
+    after: $commentsAfter
     orderBy: updatedAt
     filter: {
       issue: { team: { id: { in: $teamIds } } }

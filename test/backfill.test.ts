@@ -3,7 +3,7 @@ import { applyBootstrap, applyIssues, applyTeamGraph, toIssueInput } from "../sr
 import { backfillTeams, BACKFILL_PAGE_LIMIT, discoverWorkspace } from "../src/sync/backfill.js";
 import type { LinearClient } from "../src/linear/client.js";
 import type { BootstrapResult, IssueNode, TeamGraphResult } from "../src/linear/types.js";
-import { createTestStore, NOW } from "./helpers/store.js";
+import { createTestStore, NOW, team } from "./helpers/store.js";
 
 function bootstrapPage(teams: number, hasNextPage = false, cursor = "c1"): BootstrapResult {
   return {
@@ -323,7 +323,13 @@ describe("backfillTeams", () => {
     const store = createTestStore();
     const client = fakeClient();
     const report = await backfillTeams({ client, slot: "apiKey", store, now: () => NOW }, []);
-    expect(report).toEqual({ teams: 0, issues: 0, truncated: false, moreAvailable: false });
+    expect(report).toEqual({
+      teams: 0,
+      issues: 0,
+      removed: 0,
+      truncated: false,
+      moreAvailable: false,
+    });
     expect(client.teamGraph).not.toHaveBeenCalled();
   });
 
@@ -391,3 +397,99 @@ describe("backfillTeams", () => {
     expect(client.backfillIssues).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("the deletion sweep", () => {
+  // Without it the mirror is upsert-only: an issue deleted in Linear stays in
+  // the panel, in search, and in every agent tool result forever, and the
+  // reader acts on a card that does not exist.
+
+  function storeWithTwoOpenIssues() {
+    const store = createTestStore();
+    store.putTeams([team("t_0", "ENG")], NOW);
+    store.putIssues(
+      [
+        toIssueInput(issueNode({ id: "kept" })),
+        toIssueInput(issueNode({ id: "gone" })),
+      ],
+      NOW,
+    );
+    return store;
+  }
+
+  it("deletes only the issues Linear says are gone", async () => {
+    const store = storeWithTwoOpenIssues();
+    const client = fakeClient({
+      // The walk sees "kept" and completes; "gone" is therefore a candidate.
+      backfillIssues: vi.fn(async () => ({
+        issues: { nodes: [issueNode({ id: "kept" })], pageInfo: { hasNextPage: false } },
+      })),
+      // Linear confirms it no longer has it.
+      issuesExist: vi.fn(async () => ({ issues: { nodes: [] } })),
+    });
+
+    const report = await backfillTeams({ client, slot: "apiKey", store, now: () => NOW }, ["t_0"]);
+
+    expect(report.removed).toBe(1);
+    expect(store.issue("gone")).toBeNull();
+    expect(store.issue("kept")).not.toBeNull();
+  });
+
+  it("keeps an issue that merely CLOSED since the last walk", async () => {
+    // The walk reads open issues only, so a closed issue is missing from it —
+    // and deleting on absence alone would destroy real work. The probe is
+    // what tells the two apart.
+    const store = storeWithTwoOpenIssues();
+    const client = fakeClient({
+      backfillIssues: vi.fn(async () => ({
+        issues: { nodes: [issueNode({ id: "kept" })], pageInfo: { hasNextPage: false } },
+      })),
+      issuesExist: vi.fn(async () => ({ issues: { nodes: [{ id: "gone" }] } })),
+    });
+
+    const report = await backfillTeams({ client, slot: "apiKey", store, now: () => NOW }, ["t_0"]);
+
+    expect(report.removed).toBe(0);
+    expect(store.issue("gone")).not.toBeNull();
+  });
+
+  it("never sweeps after a truncated walk", async () => {
+    // A walk that hit the page cap did not read every open issue, so "not
+    // seen" would mostly mean "not reached" — sweeping would delete live work.
+    const store = storeWithTwoOpenIssues();
+    const issuesExist = vi.fn(async () => ({ issues: { nodes: [] } }));
+    const client = fakeClient({
+      backfillIssues: vi.fn(async () => ({
+        issues: {
+          nodes: [issueNode({ id: "kept" })],
+          pageInfo: { hasNextPage: true, endCursor: `c${String(Math.random())}` },
+        },
+      })),
+      issuesExist,
+    });
+
+    const report = await backfillTeams({ client, slot: "apiKey", store, now: () => NOW }, ["t_0"]);
+
+    expect(report.truncated).toBe(true);
+    expect(issuesExist).not.toHaveBeenCalled();
+    expect(store.issue("gone")).not.toBeNull();
+  });
+
+  it("deletes nothing when the probe itself fails", async () => {
+    // "We could not ask" must never become "it is gone" — that would turn a
+    // rate limit into data loss.
+    const store = storeWithTwoOpenIssues();
+    const client = fakeClient({
+      backfillIssues: vi.fn(async () => ({
+        issues: { nodes: [issueNode({ id: "kept" })], pageInfo: { hasNextPage: false } },
+      })),
+      issuesExist: vi.fn(async () => {
+        throw new Error("rate limited");
+      }),
+    });
+
+    const report = await backfillTeams({ client, slot: "apiKey", store, now: () => NOW }, ["t_0"]);
+
+    expect(report.removed).toBe(0);
+    expect(store.issue("gone")).not.toBeNull();
+  });
+})

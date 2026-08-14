@@ -1340,7 +1340,13 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       });
     });
 
-    bb.background.schedule("prune", "17 4 * * *", async () => {
+    // Hourly, not daily. The echo threshold is one hour, but a daily sweep
+    // meant a row recorded at 05:00 survived until 04:17 the next morning —
+    // and an echo is a *suppression*, so every extra hour it lives is an hour
+    // in which a colleague's real change to the same issue can be silently
+    // swallowed as "this plugin did it". The threshold was never the window;
+    // the schedule was.
+    bb.background.schedule("prune", "17 * * * *", async () => {
       lifetime.run("prune", () => {
         // An echo that has outlived any tick interval is a row nobody will
         // ever read again.

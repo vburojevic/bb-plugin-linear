@@ -9,7 +9,7 @@ import {
 } from "../src/sync/tiers.js";
 import { advanceWatermark, sinceFor, WATERMARK_OVERLAP_MS } from "../src/sync/watermark.js";
 import { planTick, shardTeams } from "../src/sync/tick.js";
-import { runTick } from "../src/sync/service.js";
+import { runTick, TICK_PAGE_LIMIT } from "../src/sync/service.js";
 import { TICK } from "../src/linear/documents.js";
 import type { LinearClient } from "../src/linear/client.js";
 import type { IssueNode, TickResult } from "../src/linear/types.js";
@@ -418,3 +418,99 @@ describe("runTick", () => {
     expect(outcome.issuesWatermark).toBe(5);
   });
 });
+
+describe("runTick pagination", () => {
+  // A single page used to be a terminal state, not a pause: the watermark
+  // refuses to advance on an incomplete walk, so a burst bigger than one page
+  // meant hasNextPage stayed true and the cursor never moved again.
+
+  it("follows the cursor to the end and then advances the watermark", async () => {
+    const store = createTestStore();
+    const pages: TickResult[] = [
+      {
+        issues: {
+          nodes: [issueNode({ id: "i_1", updatedAt: "2026-08-12T10:00:00.000Z" })],
+          pageInfo: { hasNextPage: true, endCursor: "c1" },
+        },
+        comments: EMPTY_PAGE,
+      },
+      {
+        issues: {
+          nodes: [issueNode({ id: "i_2", updatedAt: "2026-08-12T12:00:00.000Z" })],
+          pageInfo: { hasNextPage: false },
+        },
+        comments: EMPTY_PAGE,
+      },
+    ] as unknown as TickResult[];
+    let call = 0;
+    const client = {
+      tick: vi.fn(async () => pages[Math.min(call++, pages.length - 1)]!),
+    } as unknown as LinearClient;
+
+    const outcome = await runTick(
+      { client, store, now: () => NOW },
+      { teamIds: ["team_eng"], issuesWatermark: 1, commentsWatermark: 1, tickNumber: 0 },
+    );
+
+    expect(client.tick).toHaveBeenCalledTimes(2);
+    expect(store.issue("i_1")).not.toBeNull();
+    expect(store.issue("i_2")).not.toBeNull();
+    expect(outcome.issuesWritten).toBe(2);
+    // The newest across every page, not just the last one read.
+    expect(outcome.issuesWatermark).toBe(
+      Date.parse("2026-08-12T12:00:00.000Z") - WATERMARK_OVERLAP_MS,
+    );
+  });
+
+  it("stops at the page cap, keeps what it read, and does not advance", async () => {
+    // Background work shares an hourly budget with the person clicking, so a
+    // walk is bounded. An incomplete walk keeps its watermark and resumes.
+    const store = createTestStore();
+    let call = 0;
+    const client = {
+      tick: vi.fn(async () => ({
+        issues: {
+          nodes: [issueNode({ id: `i_${String(call++)}`, updatedAt: "2026-08-12T12:00:00.000Z" })],
+          pageInfo: { hasNextPage: true, endCursor: `c${String(call)}` },
+        },
+        comments: EMPTY_PAGE,
+      })),
+    } as unknown as LinearClient;
+
+    const outcome = await runTick(
+      { client, store, now: () => NOW },
+      { teamIds: ["team_eng"], issuesWatermark: 7, commentsWatermark: 7, tickNumber: 0 },
+    );
+
+    expect(client.tick).toHaveBeenCalledTimes(TICK_PAGE_LIMIT);
+    expect(outcome.issuesComplete).toBe(false);
+    expect(outcome.issuesWatermark).toBe(7);
+    expect(outcome.issuesWritten).toBe(TICK_PAGE_LIMIT);
+  });
+
+  it("keeps the pages it applied when a later page fails", async () => {
+    const store = createTestStore();
+    let call = 0;
+    const client = {
+      tick: vi.fn(async () => {
+        if (call++ > 0) throw new Error("boom");
+        return {
+          issues: {
+            nodes: [issueNode({ id: "i_1", updatedAt: "2026-08-12T10:00:00.000Z" })],
+            pageInfo: { hasNextPage: true, endCursor: "c1" },
+          },
+          comments: EMPTY_PAGE,
+        };
+      }),
+    } as unknown as LinearClient;
+
+    const outcome = await runTick(
+      { client, store, now: () => NOW },
+      { teamIds: ["team_eng"], issuesWatermark: 5, commentsWatermark: 5, tickNumber: 0 },
+    );
+
+    expect(store.issue("i_1")).not.toBeNull();
+    expect(outcome.issuesWatermark).toBe(5);
+    expect(outcome.issuesComplete).toBe(false);
+  });
+})
