@@ -1,83 +1,117 @@
-# bb-plugin-linear
+# Linear for bb
 
-A BB plugin.
+Linear inside bb — issues, inbox, projects and cycles at parity for daily
+engineering work — and every bb thread knowing which issue it is working on,
+live, in the header, the side panel, and the agent's own context.
 
-## UI components
+---
 
-`components/ui/` is vendored source you own (the shadcn model): edit the
-files freely — they never update out from under you. Add more from the BB
-component registry (the full shadcn set, version-matched to your BB install
-via the pinned ref in `components.json`):
+## What it does
 
-```
-npx shadcn add @bb/dialog @bb/select
-```
+**A client.** The left nav panel is a list-first Linear browser at sidebar
+width: your teams' boards as collapsible state groups, filters and facets,
+full-text search, projects, cycles, and your Linear inbox with a badge — all
+rendered from a local mirror, so every read is instant and free.
 
-Run `npm install` once before `bb plugin build` — the vendored components'
-npm deps bundle into your dist. React, and BB-shimmed packages like the
-radix portal primitives and `sonner` (`import { toast } from "sonner"`
-reaches BB's own toaster), are provided by the BB app at runtime and never
-bundled. Ship `dist/` (npm tarball or committed for git installs) so
-people installing your plugin never need npm.
+**A seam.** Every thread resolves *which issue it is working on* through a
+deterministic ladder — an explicit link, the branch name Linear generated, an
+issue key in the conversation, and only then a fuzzy title match that
+**suggests instead of binding**. The bound issue appears in the thread header,
+opens in full in the side panel (description, properties, comments, state
+picker), and is injected into every agent turn's instructions — so agents in
+any provider know their task with zero tool calls.
 
-## Manifest
+**Agents get the real thing.** Thirteen `linear_*` tools over one credential,
+identical in Claude, Codex, Kimi, OpenCode and Gemini threads: the team's own
+vocabulary (states, labels, people, estimate scale — never guessed), search
+that answers locally and escalates to Linear on request, consolidated reads
+and writes, and the two tools no remote integration can have — this thread's
+own binding, readable and writable. A bundled skill teaches the conventions.
 
-`package.json` is the plugin manifest. Notable fields:
+**Write-back that keeps its hands visible.** Optional automations move the
+issue as work moves — a bound thread starting lifts it into the team's started
+state; a pull request moves it per the team's **own** Linear git-automation
+configuration. Both ship **off**: many teams' agents already drive Linear
+themselves, and two writers fighting over one card is worse than either alone.
 
-- `bb.server` — backend entry (required); optional `bb.app` for a frontend.
-- `bb.name` and `bb.description` — required human-facing identity.
-- `bb.branding` — required; declare `icon` as a BB icon name or a
-  plugin-relative compact SVG, or declare `logo.light` (with optional
-  `logo.dark`). Logo assets must be relative `.svg`, `.png`, or
-  `.webp` files.
-- `engines.bb` — supported bb app version range.
-- `engines.bbPluginSdk` — supported plugin SDK range (scaffold: `^0.4.1`).
-
-Run `bb plugin build` before publishing git/npm installs. It writes
-`dist/server.js` + `server.meta.json` (and, with `bb.app`, `app.js` /
-`app.css` / `app.meta.json`). Each `*.meta.json` stamps SDK major/version,
-`artifactFormatVersion`, `pluginId`, `pluginVersion`, and
-`builtWith` so managed installs can verify the artifacts.
+**And the reverse seam.** `bb linear start ENG-42` (or the panel's start
+action) spawns a thread with the issue's description, acceptance criteria and
+recent comments as context, on the right project, with the issue's own branch
+name — linked from its first paint.
 
 ## Install
 
-From this directory:
-
-```
-bb plugin install .
+```sh
+bb plugin install git:https://github.com/vburojevic/bb-plugin-linear.git@main
 ```
 
-After editing sources, reload:
+Create a personal API key in Linear under **Settings → Account → Security &
+access → Personal API keys** (read is enough to browse; write to change
+anything), then:
 
-```
-bb plugin reload linear
-```
-
-## Configure
-
-```
-bb plugin config linear
-bb plugin config linear set greeting hi
+```sh
+bb plugin config linear set apiKey <key>
 ```
 
-## Types & API reference
+A second Linear workspace needs a second key — a personal key is scoped to one
+workspace — so the settings carry four slots (`apiKey2`…). Each workspace is
+discovered from its key; nothing about a workspace is ever configured by hand.
 
-`types/bb-plugin-sdk.d.ts` (and `types/bb-plugin-sdk-app.d.ts` for the
-frontend) are the full, bundled BB plugin API — `tsconfig.json` maps
-`@bb/plugin-sdk` to them, so your editor and `tsc` see real types with no extra
-install. They are readable declarations: open them for an exact signature.
+Bind a bb project to a team and the mirror fills itself:
 
-The SDK surface grows with every BB release, and these are a copy. Refresh
-them from the BB you are running:
-
-```
-bb plugin types          # rewrite types/ from this BB
-bb plugin types --check  # CI: fail when they are out of date
+```sh
+bb linear teams
+bb linear bind ENG
 ```
 
-`bb plugin build` and `bb plugin dev` refresh them for you. Ask BB to write
-plugins for you: the `bb-plugin-authoring` skill documents the whole surface
-with examples.
+## The CLI
 
-Confused by the API, or need something the types don't explain? Clone the BB
-repo and read the source: <https://github.com/get-bb/bb>.
+```
+bb linear status | doctor | budget        connection, diagnosis, rate budget
+bb linear teams | bind | unbind | refresh teams and project bindings
+bb linear issues | issue | create | sync  the mirror, read and written
+bb linear move | assign | set | comment   one issue, changed
+bb linear attach | archive                links; reversible archive
+bb linear inbox | webhook | forget        inbox; webhooks; leave no trace
+bb linear start | link | unlink           threads from issues, issues on threads
+```
+
+Every read answers from the local copy. Run any read with `--json` for
+machine output.
+
+## How it holds up
+
+- **Verified offline.** Every GraphQL document ships as inspectable text and
+  is validated against the checked-in SDL in CI — a wrong field name fails in
+  milliseconds on a laptop, not at runtime in someone's workspace. Complexity
+  is estimated per document and capped below Linear's ceiling.
+- **Budgeted.** Linear's rate-limit headers are read on every response,
+  including failures; background polling slows itself under pressure and a
+  person's click goes to the front of the queue right up until it would
+  actually fail.
+- **Webhooks are a latency improvement, not a dependency.** Registration
+  happens only after a signed self-test proves the URL reaches this bb;
+  delivery health is watched, and demotion back to polling is a log line, not
+  an outage.
+- **Secrets stay secrets.** Keys live in bb's secret store, are read fresh on
+  every request, and every error, log line, tool result and rpc payload is
+  redacted at construction.
+- **Nothing hardcoded.** No team, state name, label scheme, priority string
+  or estimate scale appears in this code — everything is discovered from the
+  workspace at runtime, in the workspace's own language.
+
+## Philosophy
+
+What bb already owns — threads, environments, worktrees, branch names, git
+state, PR status, the markdown renderer, the composer, the toaster, the
+settings form, the credential store — this plugin reads and never rebuilds.
+
+It talks to Linear over the GraphQL API with its own credential rather than
+through Linear's MCP server, because a background service cannot borrow an
+agent CLI's OAuth session — it could not poll, notify, or move an issue when
+a pull request merges at 2am — and an MCP-only integration is invisible to
+every other provider bb runs. Where your agents *do* have Linear MCP, the
+write-back automations stay off by default so the two never fight.
+
+MIT. Built in the open; the [BRIEF](./BRIEF.md) records every decision with
+the alternative it beat.

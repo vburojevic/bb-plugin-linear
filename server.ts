@@ -54,6 +54,7 @@ import { issueDetailText } from "./src/tools-format.js";
 import { registerMentionProviders } from "./src/mentions.js";
 import { registerTools } from "./src/tools.js";
 import { runPrTransition, type PrRunnerDeps } from "./src/automations/pr-runner.js";
+import { startThreadFromIssue, type StartDeps } from "./src/automations/start.js";
 import { applyIssueDetail, toIssueInput } from "./src/sync/apply.js";
 import type { IssueNode } from "./src/linear/types.js";
 import { resolveBinding, type LadderDeps } from "./src/binding.js";
@@ -1799,6 +1800,23 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       }
     }
 
+    /* ── Starting a thread from an issue (M8) ────────────────────────────── */
+
+    const startDeps: StartDeps = {
+      bb,
+      clientForIssue: (issueId) => {
+        const issue = store.issue(issueId);
+        return issue === null ? client : clientForTeam(issue.teamId);
+      },
+      store,
+      mutations,
+      bindings: () => bindingSnapshot,
+      branchMode: () => readSpawnBranchMode(initialSettings.spawnBranchMode),
+      movesStatus: () => initialSettings.spawnMovesStatus,
+      now,
+      publish: () => publish("linear:data"),
+    };
+
     /* ── The binding ladder (M3) ─────────────────────────────────────────── */
 
     /** The fuzzy rung's candidate per thread. In memory on purpose: a
@@ -2376,13 +2394,21 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         }
       },
 
-      async startThread() {
-        return {
-          ok: false,
-          threadId: null,
-          message: "Starting a thread from an issue arrives with M8.",
-          note: null,
-        };
+      async startThread({ issueId, projectId }) {
+        try {
+          const result = await startThreadFromIssue(startDeps, {
+            issueId,
+            ...(projectId === undefined ? {} : { projectId }),
+          });
+          return result;
+        } catch (error) {
+          return {
+            ok: false,
+            threadId: null,
+            message: describeError(error),
+            note: null,
+          };
+        }
       },
 
       async inbox({ markSeen }) {
@@ -3104,10 +3130,19 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         };
       },
 
-      start: async () => ({
-        ok: false,
-        message: "Starting a thread from an issue arrives with M8. Until then, start the thread and link it: bb linear link <KEY-n>.",
-      }),
+      start: async ({ identifier, projectId, move }) => {
+        const result = await startThreadFromIssue(
+          // `--no-move` is a per-invocation override of the setting, which is
+          // what makes "start a thread without touching the board" a thing
+          // somebody can do once without changing their configuration.
+          move ? startDeps : { ...startDeps, movesStatus: () => false },
+          { issueId: identifier, ...(projectId === undefined ? {} : { projectId }) },
+        );
+        return {
+          ok: result.ok,
+          message: result.note === null ? result.message : `${result.message} ${result.note}`,
+        };
+      },
 
       link: async ({ identifier, threadId }) => {
         if (threadId === undefined) {
@@ -3292,11 +3327,10 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         }
       },
 
-      startThread: async () => ({
-        ok: false,
-        message: "Starting a thread from an issue arrives with M8.",
-        note: null,
-      }),
+      startThread: async ({ issueId, projectId }) => {
+        const result = await startThreadFromIssue(startDeps, { issueId, projectId });
+        return { ok: result.ok, message: result.message, note: result.note };
+      },
 
       /**
        * The thread's own binding, as the same sentence every turn's
