@@ -55,6 +55,12 @@ import { registerMentionProviders } from "./src/mentions.js";
 import { registerTools } from "./src/tools.js";
 import { runPrTransition, type PrRunnerDeps } from "./src/automations/pr-runner.js";
 import { startThreadFromIssue, type StartDeps } from "./src/automations/start.js";
+import {
+  effectiveAgentWrites,
+  mutationVerdict,
+  WRITE_CONSENT_REMEDY,
+  writesAllowed,
+} from "./src/write-gate.js";
 import { applyIssueDetail, toIssueInput } from "./src/sync/apply.js";
 import type { IssueNode } from "./src/linear/types.js";
 import { resolveBinding, type LadderDeps } from "./src/binding.js";
@@ -209,6 +215,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       if (existing !== undefined) return existing;
       const made = makeClient({
         getCredential: () => credentialFor(slot),
+        // Every mutation, from every surface, on every slot, passes this
+        // gate — settings read fresh per request so flipping consent takes
+        // effect on the next write, like a replaced key does.
+        gateMutation: async (document) =>
+          mutationVerdict(document, writesAllowed(await settings.get())),
         log: (level, message) => lifetime.log(level, message),
         signal: lifetime.signal,
         now,
@@ -838,6 +849,20 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           : {}),
       });
 
+      // Not a warning in either direction: off is the safe default working as
+      // designed, on is a choice somebody made. The doctor's job here is only
+      // to make the state impossible to be surprised by.
+      checks.push({
+        label: "Writes",
+        status: "ok",
+        detail: writesAllowed(values)
+          ? "allowed — the plugin may change issues, comments and webhooks"
+          : "off — every change to Linear is refused; reads are unaffected",
+        ...(writesAllowed(values)
+          ? {}
+          : { fix: "To allow changes: bb plugin config linear set allowWrites true" }),
+      });
+
       // The pull-request probe check returns with the write-back automations
       // (M7); until then there is nothing on this machine to probe.
 
@@ -1360,6 +1385,13 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * back through the handler above.
      */
     async function enableWebhooks(rawUrl: string): Promise<{ ok: boolean; text: string }> {
+      // Registering a webhook writes to the workspace's configuration. The
+      // transport would refuse the webhookCreate anyway; checking first
+      // spares the self-test round trip and answers with the remedy instead
+      // of a per-team failure list.
+      if (!writesAllowed(await settings.get())) {
+        return { ok: false, text: `${WRITE_CONSENT_REMEDY}\n` };
+      }
       const verdict = checkWebhookUrl(rawUrl);
       if (!verdict.ok) return { ok: false, text: `${verdict.why}\n` };
       const url = verdict.url;
@@ -1707,7 +1739,9 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      *  out to `gh`. */
     async function runTransitionForThread(threadId: string): Promise<void> {
       const values = await settings.get();
-      if (!values.prTransitions) return;
+      // The transport would refuse anyway; checking here first keeps a
+      // consent-off install from paying gh lookups for moves it cannot make.
+      if (!writesAllowed(values) || !values.prTransitions) return;
 
       const thread = await bb.sdk.threads.get({ threadId });
       const environmentId = thread.environmentId;
@@ -1751,7 +1785,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      */
     async function moveStartedForThread(threadId: string): Promise<void> {
       const values = await settings.get();
-      if (!values.threadMovesStatus) return;
+      if (!writesAllowed(values) || !values.threadMovesStatus) return;
 
       const link = store.threadLink(threadId);
       if (link === null) return;
@@ -1812,7 +1846,9 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       mutations,
       bindings: () => bindingSnapshot,
       branchMode: () => readSpawnBranchMode(initialSettings.spawnBranchMode),
-      movesStatus: () => initialSettings.spawnMovesStatus,
+      // Spawning a thread is a read-side act and stays available without
+      // consent; the status move it would make is a write and does not.
+      movesStatus: () => writesAllowed(initialSettings) && initialSettings.spawnMovesStatus,
       now,
       publish: () => publish("linear:data"),
     };
@@ -3264,7 +3300,14 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     registerTools(bb, {
       store,
       bindings: () => bindingSnapshot,
-      agentWrites: () => readAgentWrites(initialSettings.agentWrites),
+      // The master consent switch clamps first — with writes disallowed,
+      // agents are not even OFFERED comment or write tools. `agentWrites`
+      // then narrows further among consenting installs.
+      agentWrites: () =>
+        effectiveAgentWrites(
+          writesAllowed(initialSettings),
+          readAgentWrites(initialSettings.agentWrites),
+        ),
       mutations,
       refreshIssue,
       // `skills/linear/SKILL.md`'s frontmatter name. An **unknown** name

@@ -15,6 +15,7 @@ import {
   networkFailure,
   queryFailed,
   rateLimited,
+  refused,
   rememberSecret,
   timedOut,
   unauthorized,
@@ -51,11 +52,29 @@ export type FetchLike = (
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
+/** The write-consent answer, shaped by the policy owner so the refusal
+ *  carries its own remedy sentence rather than a generic apology. */
+export type MutationVerdict =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly refusal: LinearError };
+
 export interface TransportSession {
   /** Read fresh on every request, never captured. A key can be replaced while
    *  the plugin is running, and the request after the save must use the new
    *  one without a reload. */
   getCredential(): Promise<LinearCredential | null>;
+  /**
+   * Consulted before any `kind: "mutation"` document leaves the machine —
+   * the single door every write passes through, which is what makes a
+   * consent switch structural rather than per-call discipline. Read fresh
+   * per request like the credential, so flipping consent takes effect on the
+   * next write with no reload. Absent means no policy (this transport is
+   * also test infrastructure); the plugin's server always installs one.
+   *
+   * A verdict that THROWS refuses the write. Fail closed: "the settings read
+   * broke, so the write went through" must be unsayable.
+   */
+  gateMutation?(document: LinearDocument): MutationVerdict | Promise<MutationVerdict>;
   onBudget?(snapshot: BudgetSnapshot): void;
   log?(level: LogLevel, message: string): void;
   /** Aborts for the plugin's lifetime. */
@@ -390,11 +409,28 @@ export function createTransport(
     document: LinearDocument,
     options_: ExecuteOptions = {},
   ): Promise<T> {
-    // The gate runs outside the queue so a refusal is instant rather than
-    // waiting behind whatever is currently in flight. Mutations are never
-    // gated: a person is asking, and a refusal they did not cause is worse
-    // than a request that fails honestly.
+    // Both gates run outside the queue so a refusal is instant rather than
+    // waiting behind whatever is currently in flight — and a refusal spends
+    // nothing: no queue slot, no budget, no breaker state.
+    //
+    // The breaker gates only reads (a person's write deserves to fail
+    // honestly rather than be refused for an outage they did not cause);
+    // consent gates only writes (a read refused by a consent switch would
+    // make consent look like an outage).
     if (document.kind === "query") gateRead();
+    if (document.kind === "mutation" && session.gateMutation !== undefined) {
+      let verdict: MutationVerdict;
+      try {
+        verdict = await session.gateMutation(document);
+      } catch (cause) {
+        // Fail closed, and say which way it failed: this sentence is about a
+        // broken consent CHECK, not about withheld consent.
+        throw refused(
+          `The write-consent check failed, so nothing was sent to Linear: ${describeError(cause)}`,
+        );
+      }
+      if (!verdict.allowed) throw verdict.refusal;
+    }
 
     return enqueue(async () => {
       let attempt = 0;

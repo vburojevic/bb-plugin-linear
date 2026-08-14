@@ -93,6 +93,13 @@ machine output.
   happens only after a signed self-test proves the URL reaches this bb;
   delivery health is watched, and demotion back to polling is a log line, not
   an outage.
+- **Writes need consent.** The plugin ships unable to change anything in
+  Linear: every mutation — issue edits, comments, creations, webhook
+  registration — is refused until you turn on "Allow changes to Linear", and
+  the refusal names the switch. Enforced at the one transport door every
+  mutation leaves through, so a surface added later is gated the day it is
+  written; a consent check that breaks refuses rather than allows. Reads are
+  untouched.
 - **Secrets stay secrets.** Keys live in bb's secret store, are read fresh on
   every request, and every error, log line, tool result and rpc payload is
   redacted at construction.

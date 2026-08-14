@@ -208,6 +208,21 @@ dense rows, a filter bar, saved views per team, projects and cycles pages,
 live search. A sidebar-width board is a cramped board; Linear's list idiom
 is its primary view anyway. Revisit boards only if bb grows a wide surface.
 
+**D12 — Writes need consent, enforced structurally.** `allowWrites` defaults
+to false; until a human turns it on, every GraphQL mutation — issue edits,
+comments, creations, attachments, archives, relations, webhook registration —
+is refused with one sentence naming the remedy. The enforcement point is the
+transport (every mutation is a registry document, every document leaves
+through one transport, the transport consults the gate), so a tool, CLI
+command, rpc handler or automation added later is gated the day it is written
+— `test/write-gate.test.ts` walks the whole registry to prove no mutation
+escapes. The gate fails closed: a consent check that throws refuses. Local
+state (thread links, bindings, inbox seen/dismiss) is never gated — bb's own
+tables, not Linear's. Agents are not even offered write tools without consent
+(withheld beats degraded); `agentWrites` then narrows further among
+consenting installs. Beat: per-surface checks (one forgotten call site is a
+silent bypass) and gating reads too (consent would look like an outage).
+
 ---
 
 ## 3. Architecture
