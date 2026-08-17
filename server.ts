@@ -1496,11 +1496,17 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * Two schedules. Cron is **server-local time** — the README says "on the
      * machine running bb" rather than pretending to know a timezone.
      */
-    bb.background.schedule("reconcile", "*/15 * * * *", async () => {
+    bb.background.schedule("reconcile", "*/15 * * * *", () => {
       // A hard delete leaves no tombstone, and archiving is invisible to a
       // delta poller unless `includeArchived` is set (it is). This sweep is
       // what catches the rest, within a bounded window.
-      await lifetime.runAsync("reconcile", async () => {
+      //
+      // Detached, not awaited: the host runs due schedules one at a time, and
+      // a backfill is several Linear round trips — holding the handler open
+      // for it stalls every other plugin's schedule in the same sweep.
+      // `backfillOnce` is single-flight, so a run still going when the next
+      // tick fires is joined rather than raced.
+      lifetime.detach("reconcile", async () => {
         await backfillOnce(true);
       });
     });
@@ -1875,49 +1881,62 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * poller never stopped, demotion is a latency regression rather than an
      * outage.
      */
-    bb.background.schedule("webhook-health", "*/5 * * * *", async () => {
-      if (webhookIds.size === 0) return;
-      await lifetime.runAsync("webhook-health", async () => {
-        for (const [teamId, id] of [...webhookIds]) {
-          let health;
-          try {
-            const result = await clientForTeam(teamId).readWebhook(id, {
-              initiator: "background",
-            });
-            health = webhookHealth({
-              enabled: result.webhook.enabled,
-              failures: result.webhook.failures,
-              lastDeliveryAt: lastWebhookDeliveryAt,
-              now: now(),
-            });
-          } catch (error) {
-            // A key that cannot *read* webhooks says nothing about whether
-            // deliveries are arriving, so this is not a demotion.
-            lifetime.log("debug", `Webhook health unavailable for ${teamId}: ${describeError(error)}`);
-            continue;
-          }
+    /** Set while a health pass is detached and still running. Unlike the
+     *  backfill, this loop has no single-flight of its own, and it mutates the
+     *  records it reads — two overlapping passes must never happen. */
+    let webhookHealthRunning = false;
 
-          if (health.state === "healthy") continue;
-
-          const message = describeDemotion(health, store.team(teamId)?.key ?? teamId);
-          if (message !== null) lifetime.log("warn", message);
-
-          // The record goes, so `webhook status` stops claiming a delivery
-          // path that Linear has stopped honouring. The remote webhook is left
-          // alone when Linear already disabled it, and deleted when it is
-          // merely failing, so a later `enable` starts from a clean slate.
-          if (health.state === "failing") {
+    bb.background.schedule("webhook-health", "*/5 * * * *", () => {
+      if (webhookIds.size === 0 || webhookHealthRunning) return;
+      webhookHealthRunning = true;
+      // Detached for the same reason as reconcile: a Linear round trip per
+      // webhook, awaited inside the handler, holds the host's serial schedule
+      // sweep for the full round.
+      lifetime.detach("webhook-health", async () => {
+        try {
+          for (const [teamId, id] of [...webhookIds]) {
+            let health;
             try {
-              await clientForTeam(teamId).deleteWebhook(id, { initiator: "background" });
-            } catch {
-              // Best effort. The local record going is what matters.
+              const result = await clientForTeam(teamId).readWebhook(id, {
+                initiator: "background",
+              });
+              health = webhookHealth({
+                enabled: result.webhook.enabled,
+                failures: result.webhook.failures,
+                lastDeliveryAt: lastWebhookDeliveryAt,
+                now: now(),
+              });
+            } catch (error) {
+              // A key that cannot *read* webhooks says nothing about whether
+              // deliveries are arriving, so this is not a demotion.
+              lifetime.log("debug", `Webhook health unavailable for ${teamId}: ${describeError(error)}`);
+              continue;
             }
+
+            if (health.state === "healthy") continue;
+
+            const message = describeDemotion(health, store.team(teamId)?.key ?? teamId);
+            if (message !== null) lifetime.log("warn", message);
+
+            // The record goes, so `webhook status` stops claiming a delivery
+            // path that Linear has stopped honouring. The remote webhook is left
+            // alone when Linear already disabled it, and deleted when it is
+            // merely failing, so a later `enable` starts from a clean slate.
+            if (health.state === "failing") {
+              try {
+                await clientForTeam(teamId).deleteWebhook(id, { initiator: "background" });
+              } catch {
+                // Best effort. The local record going is what matters.
+              }
+            }
+            await kv.remove(`webhook:${teamId}`);
+            webhookIds.delete(teamId);
+            store.putLocalSecret(webhookSecretKey(teamId), "");
+            cached = null;
+            publish("linear:data");
           }
-          await kv.remove(`webhook:${teamId}`);
-          webhookIds.delete(teamId);
-          store.putLocalSecret(webhookSecretKey(teamId), "");
-          cached = null;
-          publish("linear:data");
+        } finally {
+          webhookHealthRunning = false;
         }
       });
     });
