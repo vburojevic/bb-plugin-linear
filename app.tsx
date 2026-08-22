@@ -128,11 +128,4 @@ export default definePluginApp((app) => {
     id: "linear",
     component: LinearDirective,
   });
-
-  app.slots.sidebarFooterAction({
-    id: "linear-settings",
-    title: "Linear settings",
-    icon: "Layers",
-    run: ({ openSettings }) => openSettings(),
-  });
 });

@@ -272,7 +272,12 @@ export function LinearPanel({ subPath }: { subPath: string }) {
 
   return (
     <div className="flex h-full min-h-0">
-      <div className={`flex min-h-0 flex-1 flex-col ${openIssue === null ? "" : "hidden md:flex"}`}>
+      {/* min-w-0, or a long issue title sets this flex child's intrinsic
+          width and the whole list slides off a phone screen — flex items
+          default to min-width:auto and never shrink below their content. */}
+      <div
+        className={`flex min-h-0 min-w-0 flex-1 flex-col ${openIssue === null ? "" : "hidden md:flex"}`}
+      >
         <Segments />
 
         {/* Failure-first: above the list, never inside it. */}

@@ -346,8 +346,12 @@ function bucketFor(
     case "state": {
       const state = issue.stateId === null ? undefined : context.states.get(issue.stateId);
       const type = state?.type ?? "unknown";
+      // Keyed by (type, name), NOT by state id: states are per-team entities,
+      // and under "All bound teams" an id key renders every team's Done as its
+      // own group — two headers both reading DONE, which a reader can only
+      // interpret as a bug. Same name but different type stays separate.
       return {
-        key: state?.id ?? "no-state",
+        key: state === undefined ? "no-state" : `state:${type}:${state.name.toLowerCase()}`,
         label: state?.name ?? "No state",
         tone: toneForStateType(state?.type),
         order: (TYPE_ORDER[type] ?? 9) * 1000 + (state?.position ?? 0),
