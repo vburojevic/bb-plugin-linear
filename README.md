@@ -16,53 +16,96 @@
 
 ---
 
-## A client
+## The browser
 
-The left nav panel is a list-first Linear browser at sidebar width: your teams'
-boards as collapsible state groups (finished work starts folded), grouping by
-state, assignee, project or cycle, filters and facets derived from your team's
-own workflow, full-text search, and keyboard navigation — `j`/`k`, `Enter`,
-`g i` — all rendered from a local SQLite mirror, so every read is instant,
-offline-tolerant, and free.
+The screenshot above is the left nav panel: a list-first Linear browser at
+sidebar width, rendered from a **local SQLite mirror**, so every read is
+instant, offline-tolerant, and free. Your team's board becomes collapsible
+state groups — finished work starts folded behind a count, open work gets the
+screen. Priorities mark only what deserves a mark: `!!` urgent, `!` high,
+nothing for the rest.
 
-Your Linear inbox is a segment with a badge: assignments, replies, mentions and
-blockers, dismissible row by row, with a toast only when something *new*
-arrives.
+## Search
 
-**Capture is two fields away.** The `+` in the header files an issue by title
-and lands in its detail pane, where everything else has a real editor:
+Full-text, over the mirror, answering as you type. A miss says how many
+issues the cleared view holds, and the button under it clears the filters —
+the sentence and the control agree.
+
+<p align="center">
+  <img src="./assets/readme/search.png" alt="Live full-text search over the local mirror" width="900">
+</p>
+
+## Group, sort, filter
+
+Group by state, assignee, project or cycle. Sort by activity, priority, due
+date, age, or Linear's own manual order. The filter facets are **derived from
+your team's actual workflow** — a triage-enabled team gets a Triage chip, a
+team without one never sees it.
+
+<p align="center">
+  <img src="./assets/readme/filters.png" alt="Grouping, sorting, and facets derived from the team's own workflow" width="620">
+</p>
+
+## Capture
+
+The `+` in the header files an issue with the two fields you have at the
+moment of capture — a title, and maybe a description. It lands directly in
+the new issue's detail pane, where everything else has a real editor. A
+create form with nine fields loses the race against a sticky note.
 
 <p align="center">
   <img src="./assets/readme/create.png" alt="The create dialog: title, optional description, team" width="480">
 </p>
 
-## A seam
+## The thread chip
 
-Every thread resolves *which issue it is working on* through a deterministic
-ladder — an explicit link, the branch name Linear generated, an issue key in
-the conversation, and only then a fuzzy title match that **suggests instead of
-binding**. A thread whose title merely resembles an issue gets a question, not
-a bind:
+Every bb thread resolves *which issue it is working on* through a
+deterministic ladder — an explicit link, the branch name Linear generated, an
+issue key in the conversation, and only then a fuzzy title match that
+**suggests instead of binding**. A thread whose title merely resembles an
+issue gets a question, not a bind:
 
 ![The header chip suggesting LIN-3 for a matching thread](./assets/readme/chip-suggested.png)
 
-One click accepts it, and the chip becomes the issue — state glyph and all:
+One click accepts it, and the chip becomes the issue — state glyph and all.
+The binding is injected into every agent turn's instructions, so agents in
+**any provider** know their task with zero tool calls:
 
 ![The header chip bound to LIN-3](./assets/readme/chip-bound.png)
 
-The bound issue opens in full in the side panel — description, properties with
-in-place editors, sub-issues, comments — and is injected into every agent
-turn's instructions, so agents in **any** provider know their task with zero
-tool calls:
+## The issue pane
+
+The bound issue — or any issue you open — in full: description, properties
+with in-place editors (state, assignee, priority, estimate, labels, project,
+cycle, due date), sub-issue progress, comments with Markdown. The `···` menu
+starts a thread from the issue, copies its identifier or branch name, or
+archives it behind a confirmation.
 
 <p align="center">
   <img src="./assets/readme/detail.png" alt="The issue side panel: description, editable properties, comments" width="480">
 </p>
 
-And the reverse seam: `bb linear start ENG-42` (or the panel's start action)
-spawns a thread with the issue's description, acceptance criteria and recent
-comments as context, on the right project, with the issue's own branch name —
-linked from its first paint.
+## The inbox
+
+Your Linear inbox as a segment with a badge: assignments, replies, mentions
+and blockers, dismissible row by row. A toast fires only when something *new*
+arrives — never for what was already waiting when you looked.
+
+<p align="center">
+  <img src="./assets/readme/inbox.png" alt="The inbox empty state" width="900">
+</p>
+
+## The consent switch
+
+Turn off "Allow changes to Linear" and every mutation — edits, comments,
+creations, webhook registration — is refused with a sentence naming the
+switch, while every read keeps working. Enforced at the one transport door
+every mutation leaves through, so a surface added later is gated the day it
+is written.
+
+<p align="center">
+  <img src="./assets/readme/refusal.png" alt="The refusal toast naming the switch that would allow the write" width="480">
+</p>
 
 ## Agents get the real thing
 
@@ -70,14 +113,43 @@ Thirteen `linear_*` tools over one credential, identical in Claude, Codex,
 Kimi, OpenCode and Gemini threads: the team's own vocabulary (states, labels,
 people, estimate scale — never guessed), search that answers locally and
 escalates to Linear on request, consolidated reads and writes, and the two
-tools no remote integration can have — this thread's **own binding**, readable
-and writable. A bundled skill teaches the conventions.
+tools no remote integration can have — this thread's **own binding**,
+readable and writable. A bundled skill teaches the conventions.
 
-**Write-back that keeps its hands visible.** Optional automations move the
-issue as work moves — a bound thread starting lifts it into the team's started
-state; a pull request moves it per the team's **own** Linear git-automation
-configuration. Both ship **off**: many teams' agents already drive Linear
-themselves, and two writers fighting over one card is worse than either alone.
+## Everything else
+
+- **Keyboard-first** — `j`/`k` move, `Enter` opens, `/` finds, `g i` and
+  `g a` switch segments; folded groups are skipped, never walked through.
+- **Working set** — the default segment: issues your threads are working on
+  right now, and what's assigned to you but never started.
+- **Start a thread from any issue** — row menu, detail `···`, or
+  `bb linear start ENG-42`: the thread spawns with the issue's description
+  and recent comments as context, on the right project, with Linear's own
+  branch name — bound from its first paint.
+- **Issues in chat** — `::linear{key="ENG-42"}` renders as a live issue chip
+  in any message; "Open in Linear" on a message resolves every identifier it
+  names.
+- **Up to four workspaces** — each discovered from its own API key; nothing
+  configured by hand, and cross-workspace ambiguity is refused by name
+  rather than resolved by luck.
+- **Write-back automations, off by default** — a bound thread starting can
+  lift the issue into the team's started state; a merged PR can move it per
+  the team's own Linear git automation. Off, because two writers fighting
+  over one card is worse than either alone.
+- **Webhooks as an upgrade, not a dependency** — registered only after a
+  signed self-test proves the URL reaches this bb; delivery is health-checked
+  and demotion back to polling is a log line, not an outage.
+- **Budgeted** — Linear's rate-limit headers are read on every response;
+  background polling slows itself under pressure and a person's click goes
+  to the front of the queue.
+- **Verified offline** — every GraphQL document ships as inspectable text,
+  validated against the vendored SDL by the test suite; complexity is
+  estimated per document and capped below Linear's ceiling.
+- **Secrets stay secrets** — keys live in bb's secret store and every error,
+  log line, tool result and rpc payload is redacted at construction.
+- **Nothing hardcoded** — no team, state name, label scheme or estimate
+  scale appears in this code; everything is discovered from the workspace at
+  runtime, in the workspace's own language.
 
 ## Install
 
@@ -99,10 +171,6 @@ bb linear teams
 bb linear bind ENG
 ```
 
-A second Linear workspace needs a second key — a personal key is scoped to one
-workspace — so the settings carry four slots (`apiKey2`…). Each workspace is
-discovered from its key; nothing about a workspace is ever configured by hand.
-
 ## The CLI
 
 ```
@@ -117,37 +185,6 @@ bb linear start | link | unlink           threads from issues, issues on threads
 
 Every read answers from the local copy. Run any read with `--json` for
 machine output.
-
-## How it holds up
-
-- **Verified offline.** Every GraphQL document ships as inspectable text and
-  is validated against the checked-in SDL by the test suite — a wrong field
-  name fails in milliseconds on a laptop, not at runtime in someone's
-  workspace. Complexity is estimated per document and capped below Linear's
-  ceiling.
-- **Budgeted.** Linear's rate-limit headers are read on every response,
-  including failures; background polling slows itself under pressure and a
-  person's click goes to the front of the queue right up until it would
-  actually fail.
-- **Webhooks are a latency improvement, not a dependency.** Registration
-  happens only after a signed self-test proves the URL reaches this bb;
-  delivery health is watched, and demotion back to polling is a log line, not
-  an outage.
-- **One switch makes it read-only.** Turn off "Allow changes to Linear" and
-  every mutation — issue edits, comments, creations, webhook registration —
-  is refused with a sentence naming the switch, while every read keeps
-  working. Enforced at the one transport door every mutation leaves through,
-  so a surface added later is gated the day it is written; a check that
-  breaks refuses rather than allows.
-
-  ![The refusal toast naming the switch that would allow the write](./assets/readme/refusal.png)
-
-- **Secrets stay secrets.** Keys live in bb's secret store, are read fresh on
-  every request, and every error, log line, tool result and rpc payload is
-  redacted at construction.
-- **Nothing hardcoded.** No team, state name, label scheme, priority string
-  or estimate scale appears in this code — everything is discovered from the
-  workspace at runtime, in the workspace's own language.
 
 ## Philosophy
 
