@@ -133,6 +133,11 @@ const DEFAULT_RETRY_DELAY_MS = 400;
  *  answer is worth less than the lane it is occupying — the transport is
  *  single-flight, so a hung request stalls every other read behind it. */
 const DEFAULT_TIMEOUT_MS = 20_000;
+/** Background work gets half that. A person's click can queue behind at most
+ *  one in-flight request, and when that request is a discretionary tick page
+ *  the person is the one paying for its patience — a background page that has
+ *  not answered in ten seconds is better abandoned than waited for. */
+const DEFAULT_BACKGROUND_TIMEOUT_MS = 10_000;
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -172,6 +177,9 @@ export function createTransport(
   const endpoint = options.endpoint ?? LINEAR_GRAPHQL_ENDPOINT;
   const fetchImpl = options.fetchImpl ?? (globalThis.fetch as unknown as FetchLike);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // Never longer than the user timeout: a caller that tightened the overall
+  // timeout (tests, a CLI budget) must not find background work loosening it.
+  const backgroundTimeoutMs = Math.min(DEFAULT_BACKGROUND_TIMEOUT_MS, timeoutMs);
   const breakerThreshold = options.breakerThreshold ?? DEFAULT_BREAKER_THRESHOLD;
   const breakerCooldownMs = options.breakerCooldownMs ?? DEFAULT_BREAKER_COOLDOWN_MS;
   const retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
@@ -309,7 +317,12 @@ export function createTransport(
       credential.kind === "pat" ? credential.token : credential.accessToken,
     );
 
-    const signals: AbortSignal[] = [AbortSignal.timeout(options_.timeoutMs ?? timeoutMs)];
+    const signals: AbortSignal[] = [
+      AbortSignal.timeout(
+        options_.timeoutMs ??
+          (options_.initiator === "background" ? backgroundTimeoutMs : timeoutMs),
+      ),
+    ];
     if (options_.signal) signals.push(options_.signal);
     if (session.signal) signals.push(session.signal);
     const signal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);

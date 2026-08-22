@@ -674,6 +674,27 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       return { issues };
     }
 
+    /**
+     * Fire-and-forget a backfill from a handler or a schedule, with the
+     * connectivity failure demoted to debug. The generic lifetime handler
+     * logs every caught error at warn — right for a bug, wrong for "Linear
+     * is unreachable", which the circuit breaker already warns about exactly
+     * once per outage. Repeating it per reconcile and per panel mount was
+     * most of the log flood.
+     */
+    function detachBackfill(label: string, force: boolean): void {
+      lifetime.detach(label, async () => {
+        try {
+          await backfillOnce(force);
+        } catch (error) {
+          if (!isLinearError(error)) throw error;
+          if (!lifetime.disposed) {
+            lifetime.log("debug", `${label}: ${describeError(error)}`);
+          }
+        }
+      });
+    }
+
     /** Serialised the same way, and for the same reason. */
     function backfillOnce(force: boolean): Promise<{ issues: number }> {
       // Join an in-flight run rather than starting a second — but ONLY while
@@ -1186,13 +1207,57 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       return store.issue(match.id);
     }
 
+    /**
+     * Detail asks already being fetched, or recently fetched and found empty.
+     *
+     * The map is what lets `detailFor` answer instantly: an issue the mirror
+     * does not hold gets a **detached** fetch and an immediate `loading`,
+     * rather than holding the rpc handler open for a network round trip —
+     * behind the single-flight transport that round trip has waited more than
+     * a second on the event-loop clock, which is a second every other plugin's
+     * handlers queued behind. `refreshIssue` publishes when it lands and the
+     * detail surface refetches; a completed fetch that found nothing answers
+     * `missing` until its entry expires.
+     */
+    const detailFetches = new Map<string, { at: number; done: boolean }>();
+    const DETAIL_FETCH_TTL_MS = 30_000;
+
     async function detailFor(id: string): Promise<DetailResult> {
-      let issue = store.issue(id) ?? store.issueByIdentifier(id);
+      const issue = store.issue(id) ?? store.issueByIdentifier(id);
       const readable = store.boundTeamIds();
       if (issue === null) {
-        issue = await lifetime.runAsync("issue", () => refreshIssue(id, readable), null);
+        for (const [key, entry] of detailFetches) {
+          if (entry.done && now() - entry.at >= DETAIL_FETCH_TTL_MS) detailFetches.delete(key);
+        }
+        const attempt = detailFetches.get(id);
+        if (attempt !== undefined && attempt.done) {
+          return { kind: "missing", identifier: id };
+        }
+        if (attempt === undefined) {
+          detailFetches.set(id, { at: now(), done: false });
+          lifetime.detach("issue-refresh", async () => {
+            try {
+              await refreshIssue(id, readable);
+            } catch (error) {
+              if (lifetime.disposed) return;
+              // An unreachable Linear already warned once, from the breaker.
+              lifetime.log(
+                isLinearError(error) ? "debug" : "warn",
+                `issue ${id}: ${describeError(error)}`,
+              );
+            } finally {
+              if (!lifetime.disposed) {
+                detailFetches.set(id, { at: now(), done: true });
+                // The found case publishes from `refreshIssue`; the empty case
+                // publishes here so a surface showing `loading` re-asks and
+                // gets its honest `missing`.
+                publish("linear:data");
+              }
+            }
+          });
+        }
+        return { kind: "loading" };
       }
-      if (issue === null) return { kind: "missing", identifier: id };
 
       // The one place in the UI where a stranger meets the scoping rule, and
       // where the rule teaches itself: both teams named, and a way out.
@@ -1333,12 +1398,23 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       return record?.at ?? 0;
     }
 
+    /** Backoff for consecutive all-failed tick rounds never waits longer than
+     *  this, however far the doubling has gone — recovery has to be noticed
+     *  within a quarter of an hour even from deep backoff. */
+    const TICK_BACKOFF_CEILING_MS = 900_000;
+
     bb.background.service("sync", {
       async start(signal) {
         let tickNumber = 0;
         let quietTicks = 0;
         let inboxQuietTicks = 0;
         let nextInboxAt = 0;
+        // Consecutive rounds in which every attempted workspace tick failed.
+        // Doubles the sleep below: a Linear that is down gets probed on a
+        // widening interval instead of at the full cadence, which is the
+        // "exponential backoff" half of the story the circuit breaker's flat
+        // 60-second cooldown deliberately does not tell.
+        let failStreak = 0;
 
         while (!signal.aborted && !lifetime.disposed) {
           const values = await settings.get();
@@ -1385,6 +1461,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             const outcomes = await Promise.all(
               [...teamsBySlot(teamIds)].map(async ([slot, group]) => {
                 if (signal.aborted) return null;
+                // An open breaker would refuse the read at the transport's
+                // gate anyway; skipping here spends nothing at all — no queue
+                // slot, no thrown error, no log line — and counts toward the
+                // backoff so the loop slows down with the outage.
+                if (clientForSlot(slot).breaker().open) return "failed" as const;
                 const scope = watermarkScope(slot);
                 const [issuesWatermark, commentsWatermark] = await Promise.all([
                   readWatermark(KV.watermark(scope, "issues")),
@@ -1396,7 +1477,12 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
                 // what fills that gap.
                 if (issuesWatermark === 0) {
                   await lifetime.runAsync("backfill", async () => {
-                    await backfillOnce(false);
+                    try {
+                      await backfillOnce(false);
+                    } catch (error) {
+                      if (!isLinearError(error)) throw error;
+                      lifetime.log("debug", `backfill: ${describeError(error)}`);
+                    }
                   });
                   const at = now() - 60_000;
                   await Promise.all([
@@ -1421,17 +1507,25 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
                         { teamIds: group, issuesWatermark, commentsWatermark, tickNumber },
                       );
                     } catch (error) {
-                      // Recorded before the lifetime contains it, or `bb linear
+                      // Recorded before anything contains it, or `bb linear
                       // status` reports "no error" forever while the sync is
                       // failing — the field existed from day one and nothing
                       // ever assigned it. `describeError` is redacted.
                       lastSyncError = describeError(error);
+                      if (isLinearError(error)) {
+                        // One failed attempt is a debug fact. The warn for
+                        // "Linear is unreachable" belongs to the breaker,
+                        // which says it once per outage — re-warning it per
+                        // tick was the log flood this line replaces.
+                        lifetime.log("debug", `tick: ${describeError(error)}`);
+                        return "failed" as const;
+                      }
                       throw error;
                     }
                   },
                   null,
                 );
-                if (outcome === null || !outcome.applied) return outcome;
+                if (outcome === null || outcome === "failed" || !outcome.applied) return outcome;
 
                 const writes: Promise<void>[] = [];
                 if (outcome.issuesWatermark !== null) {
@@ -1454,8 +1548,17 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
                 return outcome;
               }),
             );
-            const anyApplied = outcomes.some((outcome) => outcome?.applied === true);
-            const anyChanged = outcomes.some((outcome) => outcome?.changed === true);
+            const attempted = outcomes.filter((outcome) => outcome !== null);
+            const applied = outcomes.filter(
+              (outcome): outcome is Exclude<typeof outcome, null | "failed"> =>
+                outcome !== null && outcome !== "failed",
+            );
+            const anyApplied = applied.some((outcome) => outcome.applied);
+            const anyChanged = applied.some((outcome) => outcome.changed);
+            failStreak =
+              attempted.length > 0 && attempted.every((outcome) => outcome === "failed")
+                ? failStreak + 1
+                : 0;
 
             tickNumber += 1;
             lastTickAt = now();
@@ -1487,7 +1590,17 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
             nextInboxAt = now() + inboxInterval({ quietTicks: inboxQuietTicks }, profile);
           }
 
-          await sleep(cadence.delayMs, signal);
+          // Abort-aware (wakes on dispose), and stretched by the failure
+          // streak: 1×, 2×, 4×, 8×, capped so recovery is noticed within the
+          // ceiling even when the cadence itself has decayed long.
+          const backoff = Math.min(2 ** failStreak, 8);
+          await sleep(
+            Math.min(
+              cadence.delayMs * backoff,
+              Math.max(cadence.delayMs, TICK_BACKOFF_CEILING_MS),
+            ),
+            signal,
+          );
         }
       },
     });
@@ -1506,9 +1619,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // for it stalls every other plugin's schedule in the same sweep.
       // `backfillOnce` is single-flight, so a run still going when the next
       // tick fires is joined rather than raced.
-      lifetime.detach("reconcile", async () => {
-        await backfillOnce(true);
-      });
+      detachBackfill("reconcile", true);
     });
 
     // Hourly, not daily. The echo threshold is one hour, but a daily sweep
@@ -2331,15 +2442,36 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       };
     }
 
+    /**
+     * A thread that no longer exists is an answer, not an incident. bb deletes
+     * threads routinely and the SDK reports one as HTTP 404 — which the
+     * generic lifetime handler was logging at warn, once per lifecycle event
+     * that still named the dead thread. Absence comes back as `null` and a
+     * debug line; anything else is still a real failure and still warns.
+     */
+    async function threadIfAny(threadId: string) {
+      return lifetime.runAsync(
+        "thread",
+        async () => {
+          try {
+            return await bb.sdk.threads.get({ threadId });
+          } catch (error) {
+            if (error instanceof Error && /\b404\b|not found/i.test(error.message)) {
+              lifetime.log("debug", `thread ${threadId} is gone: ${describeError(error)}`);
+              return null;
+            }
+            throw error;
+          }
+        },
+        null,
+      );
+    }
+
     async function evaluateThreadBinding(
       threadId: string,
       extraTexts: readonly string[],
     ): Promise<void> {
-      const thread = await lifetime.runAsync(
-        "thread",
-        () => bb.sdk.threads.get({ threadId }),
-        null,
-      );
+      const thread = await threadIfAny(threadId);
       if (thread === null) return;
 
       const projectId = thread.projectId ?? null;
@@ -2661,11 +2793,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       },
 
       async bindThread({ threadId, issueId }) {
-        const thread = await lifetime.runAsync(
-          "thread",
-          () => bb.sdk.threads.get({ threadId }),
-          null,
-        );
+        const thread = await threadIfAny(threadId);
         return bindManually(threadId, issueId, thread?.projectId ?? null);
       },
 
@@ -2848,9 +2976,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           });
         }
         if (deps.boundTeamIds.length > 0) {
-          lifetime.detach("backfill", async () => {
-            await backfillOnce(false);
-          });
+          detachBackfill("backfill", false);
         }
         return buildPanelView(deps, {
           team: query.team,
@@ -2870,9 +2996,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         lastFrontendReadAt = now();
         const deps = await panelDeps(true);
         if (deps.boundTeamIds.length > 0) {
-          lifetime.detach("backfill", async () => {
-            await backfillOnce(false);
-          });
+          detachBackfill("backfill", false);
         }
         return { view: buildWorkingSet(deps, team), notice: panelNotice() };
       },
@@ -2901,9 +3025,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         store.setBinding(projectId, teamId, role, now());
         refreshBindings();
         publishStructure();
-        lifetime.detach("backfill", async () => {
-          await backfillOnce(false);
-        });
+        detachBackfill("backfill", false);
         return {
           ok: true,
           message: `Reading ${team.name}'s open issues — this takes a few seconds the first time.`,
@@ -2925,10 +3047,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       async resolveIdentifiers({ identifiers, threadId }) {
         if (identifiers.length === 0) return { issues: [] };
 
-        const thread =
-          threadId === null
-            ? null
-            : await lifetime.runAsync("thread", () => bb.sdk.threads.get({ threadId }), null);
+        const thread = threadId === null ? null : await threadIfAny(threadId);
         const projectId = thread?.projectId ?? null;
         const current = projectId === null ? null : scopeFor(projectId, bindingSnapshot);
 
@@ -3083,9 +3202,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         }
         store.setBinding(resolved, team.id, role, now());
         refreshBindings();
-        lifetime.detach("backfill", async () => {
-          await backfillOnce(false);
-        });
+        detachBackfill("backfill", false);
         publishStructure();
         return { ok: true, message: `Bound ${team.name} (${team.key}) as ${role}.` };
       },
@@ -3122,9 +3239,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         // two-second budget, so it is started rather than awaited. Returning
         // -1 is the runner's signal to say "started" rather than a count it
         // would have to invent.
-        lifetime.detach("sync", async () => {
-          await backfillOnce(full);
-        });
+        detachBackfill("sync", full);
         return -1;
       },
 
@@ -3803,11 +3918,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           const result = bindManually(threadId, null, null);
           return { ok: result.ok, message: result.message ?? "Unlinked." };
         }
-        const thread = await lifetime.runAsync(
-          "thread",
-          () => bb.sdk.threads.get({ threadId }),
-          null,
-        );
+        const thread = await threadIfAny(threadId);
         const projectId = thread?.projectId ?? null;
         if (projectId === null) {
           return { ok: false, message: "This thread has no project, so no Linear scope can be established." };
