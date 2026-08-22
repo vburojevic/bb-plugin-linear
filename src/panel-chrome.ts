@@ -207,6 +207,27 @@ export const chrome = {
   },
 };
 
+/**
+ * The one collapse rule, shared by the renderer and the keyboard list.
+ *
+ * Finished work starts folded; the stored list records toggles away from
+ * that default; a live search opens everything. Two copies of this rule
+ * already diverged once — the renderer folded Done while j/k kept walking
+ * the selection through its invisible rows.
+ */
+export function isGroupCollapsed(
+  group: { readonly key: string; readonly tone: string },
+  collapsed: readonly string[],
+  searching: boolean,
+): boolean {
+  const startsCollapsed =
+    !searching &&
+    (group.tone === "completed" ||
+      group.tone === "canceled" ||
+      group.tone === "duplicate");
+  return collapsed.includes(group.key) !== startsCollapsed;
+}
+
 /** Whether anything is narrowing the list. Drives the Clear filters control
  *  and the empty state's choice of sentence. */
 export function hasActiveFilters(value: ChromeState): boolean {

@@ -11,9 +11,14 @@ live, in the header, the side panel, and the agent's own context.
 ## What it does
 
 **A client.** The left nav panel is a list-first Linear browser at sidebar
-width: your teams' boards as collapsible state groups, filters and facets,
-full-text search, projects, cycles, and your Linear inbox with a badge — all
-rendered from a local mirror, so every read is instant and free.
+width: your teams' boards as collapsible state groups (finished work starts
+folded), filters and facets, grouping by state, assignee, project or cycle,
+full-text search, keyboard navigation, and your Linear inbox with a badge —
+all rendered from a local mirror, so every read is instant and free. Capture
+is two fields away: a **+** in the header files an issue by title and lands
+in its detail pane, where everything else has a real editor.
+
+<img src="./assets/readme/create.png" alt="The create dialog: title, optional description, team" width="480">
 
 **A seam.** Every thread resolves *which issue it is working on* through a
 deterministic ladder — an explicit link, the branch name Linear generated, an

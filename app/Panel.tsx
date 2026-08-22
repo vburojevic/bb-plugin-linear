@@ -8,6 +8,7 @@ import {
   chrome,
   hasActiveFilters,
   hydrateSort,
+  isGroupCollapsed,
   loadsForSegment,
   usePanelChrome,
 } from "../src/panel-chrome.js";
@@ -115,10 +116,15 @@ export function LinearPanel({ subPath }: { subPath: string }) {
       panel.status === "ready" &&
       panel.value.state.kind === "rows"
     ) {
-      return panel.value.state.groups.flatMap((group) => group.rows);
+      // Folded groups contribute nothing: j/k walking the selection through
+      // twenty invisible Done rows is a list that goes dark mid-keystroke.
+      const searching = state.search.trim() !== "";
+      return panel.value.state.groups.flatMap((group) =>
+        isGroupCollapsed(group, state.collapsed, searching) ? [] : group.rows,
+      );
     }
     return [];
-  }, [panel, state.segment, working]);
+  }, [panel, state.segment, working, state.collapsed, state.search]);
 
   const open = useCallback(
     (id: string) => {
@@ -502,7 +508,16 @@ function GroupedRows({
           role="listbox"
           tabIndex={0}
           aria-label="Linear issues"
-          aria-activedescendant={selected === null ? undefined : `bbl-row-${selected}`}
+          aria-activedescendant={
+            selected !== null &&
+            state.groups.some(
+              (group) =>
+                !isGroupCollapsed(group, collapsed, searching) &&
+                group.rows.some((row) => row.id === selected),
+            )
+              ? `bbl-row-${selected}`
+              : undefined
+          }
           onScroll={onScroll}
           /*
             The cap is a reading measure, not a layout preference. Past about
@@ -522,12 +537,7 @@ function GroupedRows({
               tells the truth. While a search is active every group opens —
               a hit hidden under a folded header reads as a miss.
             */
-            const startsCollapsed =
-              !searching &&
-              (group.tone === "completed" ||
-                group.tone === "canceled" ||
-                group.tone === "duplicate");
-            const isCollapsed = collapsed.includes(group.key) !== startsCollapsed;
+            const isCollapsed = isGroupCollapsed(group, collapsed, searching);
             // A collapsed group renders no rows, so it spends none of the
             // window — otherwise collapsing a group would shorten the list you
             // can reach, which is the opposite of what collapsing is for.
