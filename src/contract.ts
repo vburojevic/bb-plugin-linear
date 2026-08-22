@@ -934,6 +934,40 @@ export const rpcContract = defineRpcContract({
     output: z.object({ ok: z.boolean(), message: z.string().nullable() }),
   },
 
+  /** The teams the panel could create an issue in: bound, write-scoped.
+   *  Separate from `panel` because the create dialog needs it on every
+   *  segment, including ones that never load the issue projection. */
+  createTargets: {
+    input: z.null(),
+    output: z.object({
+      teams: z.array(
+        z.object({ id: z.string(), key: z.string(), name: z.string() }),
+      ),
+    }),
+  },
+
+  /**
+   * Create an issue from the panel. Deliberately the two fields a person
+   * has at the moment of capture — title, and maybe a description. State,
+   * assignee, priority and the rest are one click away in the detail pane
+   * this returns into, and a create dialog with nine fields is a form
+   * nobody opens twice.
+   */
+  createIssue: {
+    input: z
+      .object({
+        teamId: z.string().min(1),
+        title: z.string().min(1),
+        description: z.string().optional(),
+      })
+      .strict(),
+    output: z.object({
+      ok: z.boolean(),
+      message: z.string().nullable(),
+      identifier: z.string().nullable(),
+    }),
+  },
+
   disconnect: {
     input: z.object({ confirm: z.literal(true) }).strict(),
     output: z.object({ ok: z.boolean(), message: z.string() }),

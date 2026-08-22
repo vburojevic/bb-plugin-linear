@@ -109,6 +109,8 @@ export const serverRpcContract = defineRpcContract({
   unbind: legacyContract.unbind,
   resolveIdentifiers: legacyContract.resolveIdentifiers,
   archiveIssue: legacyContract.archiveIssue,
+  createTargets: legacyContract.createTargets,
+  createIssue: legacyContract.createIssue,
   startThread: legacyContract.startThread,
   inbox: legacyContract.inbox,
   inboxSummary: legacyContract.inboxSummary,

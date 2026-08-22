@@ -68,7 +68,7 @@ import {
   WRITE_CONSENT_REMEDY,
   writesAllowed,
 } from "./src/write-gate.js";
-import { applyIssueDetail, toIssueInput } from "./src/sync/apply.js";
+import { applyIssueDetail, applyIssues, toIssueInput } from "./src/sync/apply.js";
 import type { IssueDetailNode, IssueNode } from "./src/linear/types.js";
 import { resolveBinding, type LadderDeps } from "./src/binding.js";
 import { crossTeamRefusal, scopeFor } from "./src/bindings.js";
@@ -2655,6 +2655,16 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      * surface, which the audit found had none. Cross-workspace identifier
      * ambiguity is refused rather than resolved to an arbitrary row.
      */
+    /** The union of every binding's write set — the teams the panel surface
+     *  may change. Computed per call: bindings change under a running panel. */
+    function panelWritableTeamIds(): Set<string> {
+      return new Set(
+        bindingSnapshot.flatMap((row) =>
+          scopeFor(row.projectId, bindingSnapshot).writeTeamIds,
+        ),
+      );
+    }
+
     function panelWritableIssue(
       idOrIdentifier: string,
     ): { issue: NonNullable<ReturnType<Store["issue"]>> } | { message: string } {
@@ -2670,11 +2680,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       }
       if (issue === null) return { message: `No issue called ${idOrIdentifier}.` };
 
-      const writable = new Set(
-        bindingSnapshot.flatMap((row) =>
-          scopeFor(row.projectId, bindingSnapshot).writeTeamIds,
-        ),
-      );
+      const writable = panelWritableTeamIds();
       if (!writable.has(issue.teamId)) {
         const team = store.team(issue.teamId);
         return {
@@ -3091,6 +3097,44 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           return { ok: true, message: null };
         } catch (error) {
           return { ok: false, message: describeError(error) };
+        }
+      },
+
+      async createTargets() {
+        const teams = [...panelWritableTeamIds()]
+          .map((teamId) => store.team(teamId))
+          .filter((team): team is NonNullable<typeof team> => team !== null)
+          .map((team) => ({ id: team.id, key: team.key, name: team.name }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        return { teams };
+      },
+
+      async createIssue({ teamId, title, description }) {
+        if (!panelWritableTeamIds().has(teamId)) {
+          const team = store.team(teamId);
+          return {
+            ok: false,
+            identifier: null,
+            message: `No bb project here is bound to ${team?.name ?? "that team"} with write access.`,
+          };
+        }
+        try {
+          const node = await createIssue(mutations, clientForTeam, {
+            teamId,
+            title,
+            ...(description === undefined || description.trim() === ""
+              ? {}
+              : { description }),
+            clientId: clientId(),
+          });
+          // Into the mirror now, not at the next tick: the dialog navigates
+          // straight to the new issue, and a detail pane that answers "no
+          // such issue" about the thing it just made is a bug with a receipt.
+          applyIssues(store, [node], now());
+          publish("linear:data");
+          return { ok: true, identifier: node.identifier, message: null };
+        } catch (error) {
+          return { ok: false, identifier: null, message: describeError(error) };
         }
       },
 

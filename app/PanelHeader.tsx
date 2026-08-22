@@ -28,6 +28,7 @@ import {
   loadsForSegment,
   usePanelChrome,
 } from "../src/panel-chrome.js";
+import { NewIssueButton } from "./NewIssue.js";
 import { useAsync, useLinearRpc } from "./rpc.js";
 
 /**
@@ -97,6 +98,8 @@ export function LinearPanelHeader() {
           </SelectContent>
         </Select>
       ) : null}
+
+      <NewIssueButton currentTeamId={state.teamId} />
 
       {/*
         On compact the header carries the team selector and ONE control: a
