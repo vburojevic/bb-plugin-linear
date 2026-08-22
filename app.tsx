@@ -1,13 +1,10 @@
 // bb-plugin-linear — frontend entry. Registration only; views live in app/.
 import "./app.css";
 import { useCallback } from "react";
-import { definePluginApp, useRealtime } from "@bb/plugin-sdk/app";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { definePluginApp, useBbNavigate, useRealtime } from "@bb/plugin-sdk/app";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Icon } from "@/components/ui/icon";
 import { LinearDirective } from "./app/Directive.js";
 import { HeaderChip } from "./app/HeaderChip.js";
 import { IssuePanel } from "./app/IssuePanel.js";
@@ -18,36 +15,49 @@ import { identifiersInText } from "./src/select/identifiers.js";
 
 function ConnectionCard() {
   const rpc = useLinearRpc();
+  const navigate = useBbNavigate();
   const state = useAsync(
     useCallback(async () => rpc.call("status"), [rpc]),
     [],
   );
   useRealtime("linear:connection", state.reload);
 
+  /* No CardHeader: the host already draws this section's "Linear" heading,
+     and a card that repeats the heading it sits under reads as a stutter. */
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>Linear</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-1 text-sm text-muted-foreground">
-        {state.status === "failed" ? (
-          <p className="text-destructive">{state.message}</p>
-        ) : state.status === "loading" ? (
-          <p>Checking the connection…</p>
-        ) : !state.value.configured ? (
-          <p>
-            No API key yet — add one in this plugin&apos;s settings, or run{" "}
-            <code className="text-foreground">bb plugin config linear set apiKey &lt;key&gt;</code>.
-          </p>
-        ) : (
-          state.value.accounts.map((account) => (
-            <p key={account.slot}>
-              {account.error !== null
-                ? `${account.label}: ${account.error}`
-                : `Connected as ${account.displayName} in ${account.orgName} (${account.orgUrlKey})`}
+      <CardContent className="flex items-center gap-3 py-3 text-sm text-muted-foreground">
+        <div className="min-w-0 flex-1 space-y-1">
+          {state.status === "failed" ? (
+            <p className="text-destructive">{state.message}</p>
+          ) : state.status === "loading" ? (
+            <p>Checking the connection…</p>
+          ) : !state.value.configured ? (
+            <p>
+              No API key yet — add one in this plugin&apos;s settings, or run{" "}
+              <code className="text-foreground">bb plugin config linear set apiKey &lt;key&gt;</code>.
             </p>
-          ))
-        )}
+          ) : (
+            state.value.accounts.map((account) => (
+              <p key={account.slot} className="truncate">
+                {account.error !== null
+                  ? `${account.label}: ${account.error}`
+                  : `Connected as ${account.displayName} in ${account.orgName} (${account.orgUrlKey})`}
+              </p>
+            ))
+          )}
+        </div>
+        {state.status === "ready" && state.value.configured ? (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 shrink-0 gap-1.5 text-xs"
+            onClick={() => navigate.toPluginPanel("linear", { subPath: "" })}
+          >
+            Open the panel
+            <Icon name="ArrowRight" className="size-3" aria-hidden />
+          </Button>
+        ) : null}
       </CardContent>
     </Card>
   );

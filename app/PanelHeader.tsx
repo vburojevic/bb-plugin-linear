@@ -161,6 +161,8 @@ export function LinearPanelHeader() {
           >
             <DropdownMenuRadioItem value="state">State</DropdownMenuRadioItem>
             <DropdownMenuRadioItem value="assignee">Assignee</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="project">Project</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="cycle">Cycle</DropdownMenuRadioItem>
             <DropdownMenuRadioItem value="none">Nothing</DropdownMenuRadioItem>
           </DropdownMenuRadioGroup>
 

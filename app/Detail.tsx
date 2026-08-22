@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Markdown, useRealtime } from "@bb/plugin-sdk/app";
+import { Markdown, useBbNavigate, useRealtime } from "@bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
@@ -8,8 +8,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { ArchiveDialog } from "./ArchiveDialog.js";
 import type { DetailResult, DetailView } from "../src/contract.js";
 import { formatDateTime } from "../src/format.js";
 import { toneClass } from "../src/select/tone.js";
@@ -107,8 +109,8 @@ function DetailBody({
           <p className="bbl-text text-sm">{result.message}</p>
         </div>
         <p className="text-sm text-muted-foreground">
-          Bindings live in this plugin&apos;s settings — the Linear button in bb&apos;s sidebar
-          footer opens that page.
+          Bindings live in this plugin&apos;s settings, or on the command line:{" "}
+          <code className="text-foreground">bb linear bind &lt;TEAM-KEY&gt;</code>.
         </p>
       </div>
     );
@@ -173,6 +175,7 @@ function IssueBody({
                   </a>
                 </Button>
               ) : null}
+            <DetailMenu detail={detail} onClose={onClose} />
             {onClose !== undefined ? (
               <Button
                 variant="ghost"
@@ -344,6 +347,95 @@ function StatePicker({
         ))}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+/**
+ * The pane's own copy of the row actions.
+ *
+ * The list offers these on hover and right-click — two affordances a touch
+ * pointer does not have, which made the detail pane the only surface a phone
+ * can reach and the one surface with no actions on it. Same items, same
+ * order, destructive last behind a separator.
+ */
+function DetailMenu({ detail, onClose }: { detail: DetailView; onClose?: () => void }) {
+  const rpc = useLinearRpc();
+  const navigate = useBbNavigate();
+  const [archiving, setArchiving] = useState(false);
+
+  const start = useCallback(() => {
+    void (async () => {
+      const result = await rpc.call("startThread", { issueId: detail.id });
+      if (!result.ok) {
+        toast.error(result.message);
+        return;
+      }
+      toast.success(result.note === null ? result.message : `${result.message} ${result.note}`);
+      if (result.threadId !== null) navigate.toThread(result.threadId);
+    })();
+  }, [rpc, navigate, detail.id]);
+
+  const confirmArchive = useCallback(() => {
+    setArchiving(false);
+    void (async () => {
+      const result = await rpc.call("archiveIssue", { id: detail.id });
+      if (result.ok) {
+        toast.success(`Archived ${detail.identifier}.`);
+        // The pane is showing an issue that is no longer in the mirror;
+        // leaving it open would render a ghost.
+        onClose?.();
+      } else {
+        toast.error(result.message ?? `Couldn't archive ${detail.identifier}.`);
+      }
+    })();
+  }, [rpc, detail.id, detail.identifier, onClose]);
+
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7"
+            aria-label={`More actions for ${detail.identifier}`}
+          >
+            <Icon name="MoreHorizontal" className="size-4" aria-hidden />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuItem onSelect={start}>
+            Start a thread from this issue
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onSelect={() => void navigator.clipboard?.writeText(detail.identifier)}
+          >
+            Copy identifier
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={() =>
+              void navigator.clipboard?.writeText(detail.branchName ?? detail.identifier)
+            }
+          >
+            Copy branch name
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            onSelect={() => setArchiving(true)}
+          >
+            Archive
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <ArchiveDialog
+        target={archiving ? detail : null}
+        onCancel={() => setArchiving(false)}
+        onConfirm={confirmArchive}
+      />
+    </>
   );
 }
 

@@ -122,8 +122,11 @@ export function buildPanelView(deps: PanelDeps, query: PanelQuery): PanelView {
   const issues = deps.store.queryIssues({ ...filter, sort: query.sort, limit: PANEL_ROW_LIMIT });
   const total = deps.store.countIssues(filter);
   // The baseline for "Clear filters to see all 214" — the same scope with
-  // every facet dropped, including the search text.
-  const totalWithoutFilters = deps.store.countIssues({ teamIds });
+  // every facet dropped, including the search text. Completed rows count:
+  // clearing filters restores the segment's default view, and that default
+  // includes Done — a baseline that skips them promises "all 6" and then
+  // shows 31.
+  const totalWithoutFilters = deps.store.countIssues({ teamIds, includeCompleted: true });
 
   const states = new Map<string, WorkflowStateRow>();
   for (const teamId of teamIds) {

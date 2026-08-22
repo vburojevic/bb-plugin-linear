@@ -1,15 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useBbNavigate, useRealtime } from "@bb/plugin-sdk/app";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
+import { ArchiveDialog } from "./ArchiveDialog.js";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import type { IssueRowView, PanelView, Sort, WorkingSetView } from "../src/contract.js";
@@ -322,7 +313,7 @@ export function LinearPanel({ subPath }: { subPath: string }) {
       ) : null}
 
       <ArchiveDialog
-        row={archiving}
+        target={archiving}
         onCancel={() => setArchiving(null)}
         onConfirm={confirmArchive}
       />
@@ -337,62 +328,6 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
     return () => clearTimeout(timer);
   }, [value, delayMs]);
   return debounced;
-}
-
-/**
- * The one confirmation in the panel, and the only destructive-shaped action
- * any surface offers on an issue.
- *
- * It says what archiving actually does, including that it is **reversible in
- * Linear** — because the word "archive" means different things in different
- * trackers, and someone who has been burned by one that meant "delete" needs
- * to be told which kind this is before they press it, not after.
- */
-function ArchiveDialog({
-  row,
-  onCancel,
-  onConfirm,
-}: {
-  row: IssueRowView | null;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <AlertDialog
-      open={row !== null}
-      onOpenChange={(next) => {
-        if (!next) onCancel();
-      }}
-    >
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>
-            Archive {row?.identifier ?? "this issue"}?
-          </AlertDialogTitle>
-          <AlertDialogDescription>
-            {row === null ? null : (
-              <>
-                <strong>{row.title}</strong>
-                <br />
-                <br />
-              </>
-            )}
-            This archives the issue in Linear, for everyone — not just in bb. It is{" "}
-            <strong>reversible</strong> in Linear&apos;s own UI, and it is not a delete.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel>Keep it</AlertDialogCancel>
-          <AlertDialogAction
-            onClick={onConfirm}
-            className="bg-destructive text-white hover:bg-destructive/90"
-          >
-            Archive
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
 }
 
 function PanelBody({
