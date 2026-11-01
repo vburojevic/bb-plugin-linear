@@ -871,7 +871,7 @@ function WorkingSet({
  *  as the list, so nothing jumps sideways when the panel changes what it is
  *  showing. */
 function Body({ children }: { children: React.ReactNode }) {
-  return <div className="w-full max-w-[56rem] space-y-3 p-4 md:p-5">{children}</div>;
+  return <div className="bbl-scroller min-h-0 w-full max-w-[56rem] flex-1 space-y-3 overflow-y-auto p-4 md:p-5">{children}</div>;
 }
 
 function Notice({ tone, children }: { tone: "warn" | "error"; children: React.ReactNode }) {
