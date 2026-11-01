@@ -554,7 +554,11 @@ export function createCliRunner(env: CliEnvironment): CliRunner {
             title: flagString(args, "title"),
             addLabel: flagString(args, "label"),
             removeLabel: flagString(args, "unlabel"),
-            projectId: projectId(args, ctx),
+            // `--project` here is the Linear project to move the issue into,
+            // so it cannot also name the bb project. Reading it twice scoped
+            // the lookup to a bb project called e.g. "Q4 Roadmap", which has
+            // no team binding, and every `--project` came back "No issue".
+            projectId: ctx.projectId,
           });
           return result.ok ? ok(`${result.message}\n`) : fail(`${result.message}\n`);
         }

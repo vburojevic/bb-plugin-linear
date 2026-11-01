@@ -162,6 +162,22 @@ describe("bb linear", () => {
     expect(seen["addLabel"]).toBe("bug");
   });
 
+  it("reads set --project as the Linear project, not the bb project", async () => {
+    // Found live: `--project` was also read as the bb project, so the issue was
+    // looked up in a bb project named after the Linear one and never found.
+    let seen: Record<string, unknown> = {};
+    await createCliRunner(
+      environment({
+        set: async (args) => {
+          seen = args as unknown as Record<string, unknown>;
+          return { ok: true, message: "ok" };
+        },
+      }),
+    )(["set", "ENG-1", "--project", "Q4 Roadmap"], { ...CTX, projectId: "proj_from_cwd" });
+    expect(seen["project"]).toBe("Q4 Roadmap");
+    expect(seen["projectId"]).toBe("proj_from_cwd");
+  });
+
   it("needs a title to create an issue", async () => {
     const result = await createCliRunner(environment())(["create"], CTX);
     expect(result.exitCode).toBe(1);
