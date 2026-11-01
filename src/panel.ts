@@ -403,6 +403,19 @@ export function buildRowViews(deps: PanelDeps, issues: readonly IssueRow[]): Iss
   return issues.map((issue) => selectRow(issue, context));
 }
 
+/**
+ * Two priority-sorted issue lists as one, without duplicates, in the store's
+ * own "priority" order: 1..4 first, None (0) last, then most recently updated.
+ */
+function mergeByPriority(a: readonly IssueRow[], b: readonly IssueRow[]): IssueRow[] {
+  const byId = new Map<string, IssueRow>();
+  for (const issue of [...a, ...b]) byId.set(issue.id, issue);
+  const rank = (priority: number) => (priority === 0 ? 5 : priority);
+  return [...byId.values()].sort(
+    (x, y) => rank(x.priority) - rank(y.priority) || (y.updatedAt ?? 0) - (x.updatedAt ?? 0),
+  );
+}
+
 export function buildWorkingSet(deps: PanelDeps, team: string | null): WorkingSetView {
   const teamIds = scopeTeams(deps, team);
 
@@ -416,7 +429,23 @@ export function buildWorkingSet(deps: PanelDeps, team: string | null): WorkingSe
   // Every open issue in scope. The buckets are a partition of this, not five
   // separate queries — which is what makes "at most one bucket per issue"
   // enforceable rather than aspirational.
-  const issues = deps.store.queryIssues({ teamIds, sort: "priority", limit: PANEL_ROW_LIMIT });
+  //
+  // The team's top rows alone are not enough. On a team with more open issues
+  // than the row limit, the viewer's own low-priority work sits past the cut,
+  // and "Assigned to you, never started" showed 5 of 41. So the viewer's open
+  // issues are fetched on their own and merged in, in the same order.
+  const viewerId = deps.store.viewer()?.id ?? null;
+  const teamIssues = deps.store.queryIssues({ teamIds, sort: "priority", limit: PANEL_ROW_LIMIT });
+  const viewerIssues =
+    viewerId === null
+      ? []
+      : deps.store.queryIssues({
+          teamIds,
+          assigneeIds: [viewerId],
+          sort: "priority",
+          limit: PANEL_ROW_LIMIT,
+        });
+  const issues = mergeByPriority(teamIssues, viewerIssues);
   const issueIds = issues.map((issue) => issue.id);
 
   const states = new Map<string, WorkflowStateRow>();
@@ -459,7 +488,7 @@ export function buildWorkingSet(deps: PanelDeps, team: string | null): WorkingSe
         .map((row) => [row.issueId!, { attention: row.prAttention ?? "none" }]),
     ),
     blockers,
-    viewerId: deps.store.viewer()?.id ?? null,
+    viewerId,
     stateTypes: new Map([...states].map(([id, state]) => [id, state.type])),
   };
 

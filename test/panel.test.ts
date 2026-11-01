@@ -3,6 +3,8 @@ import {
   buildFacets,
   buildPanelView,
   buildThreadCandidates,
+  buildWorkingSet,
+  PANEL_ROW_LIMIT,
   type PanelDeps,
 } from "../src/panel.js";
 import {
@@ -652,5 +654,41 @@ describe("estimateScale", () => {
     expect(estimateLabel(3, "fibonacci")).toBe("3 points");
     expect(estimateLabel(1, "fibonacci")).toBe("1 point");
     expect(estimateLabel(0, "fibonacci")).toBe("No estimate");
+  });
+});
+
+describe("buildWorkingSet", () => {
+  it("keeps your own issues when the team has more open issues than the row limit", () => {
+    // A busy team fills the row limit with other people's urgent work. Your
+    // own unprioritised issues sort after all of it, and must still appear.
+    const store = createTestStore();
+    store.putTeams([team("team_eng", "ENG", { name: "Engineering" })], NOW);
+    store.replaceWorkflowStates("team_eng", [state("s_todo", "team_eng", "unstarted", 1, "Todo")]);
+    store.putMembers([member("u_me", "Ada Lovelace", true), member("u_other", "Somebody")]);
+    store.replacePriorityValues([{ priority: 0, label: "No priority" }]);
+    store.putIssues(
+      [
+        ...Array.from({ length: PANEL_ROW_LIMIT + 10 }, (_, index) =>
+          issue({ id: `o${index}`, stateId: "s_todo", assigneeId: "u_other", priority: 1 }),
+        ),
+        issue({ id: "m1", stateId: "s_todo", assigneeId: "u_me", priority: 0 }),
+        issue({ id: "m2", stateId: "s_todo", assigneeId: "u_me", priority: 0 }),
+      ],
+      NOW,
+    );
+    const view = buildWorkingSet(
+      {
+        store,
+        now: () => NOW,
+        hasCredential: true,
+        boundTeamIds: ["team_eng"],
+        backfilledTeamIds: new Set(["team_eng"]),
+        notice: null,
+      },
+      null,
+    );
+    if (view.kind !== "buckets") throw new Error("expected buckets");
+    const unstarted = view.buckets.find((bucket) => bucket.id === "assigned-unstarted");
+    expect(unstarted?.rows.map((row) => row.id).sort()).toEqual(["m1", "m2"]);
   });
 });
