@@ -139,7 +139,7 @@ export function selectSecondLine(facts: SecondLineFacts): SecondLine | null {
  * The pull-request vocabulary is **borrowed, not minted.**
  *
  * These are bb's own resolved `attention` values, straight off
- * `environments.pullRequest`, and the words are the words a sibling PR plugin
+ * bb's GitHub PR Status plugin, and the words are the words a sibling PR plugin
  * already uses. A user running both must not meet two vocabularies for one
  * pull request fifteen pixels apart. States that are not asking anything of
  * anybody — `none`, `merged`, `draft` — deliberately have no entry, so they

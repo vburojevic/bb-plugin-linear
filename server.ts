@@ -79,6 +79,7 @@ import { issueNeedsRefresh, registerTools } from "./src/tools.js";
 import { fetchLinearImage, resolveImageAccess } from "./src/image-proxy.js";
 import type { TimelineVocabulary } from "./src/select/timeline.js";
 import { runPrTransition, type PrRunnerDeps } from "./src/automations/pr-runner.js";
+import { lookupPullRequest } from "./src/automations/pull-request-lookup.js";
 import { startThreadFromIssue, type StartDeps } from "./src/automations/start.js";
 import {
   effectiveAgentWrites,
@@ -2744,7 +2745,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         now,
         log: (level, message) => lifetime.log(level, message),
         lookupPullRequest: (environmentId) =>
-          bb.sdk.environments.pullRequest({ environmentId }) as never,
+          lookupPullRequest((args) => bb.sdk.plugins.callRpc(args), environmentId),
       };
     }
 
