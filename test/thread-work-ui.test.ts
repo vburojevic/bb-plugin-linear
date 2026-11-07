@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { installTestPluginRuntime, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { createTestStore, issue, NOW, state, team } from "./helpers/store.js";
 import { threadIssuesFor, threadWorkBinding } from "../src/thread-issues.js";
@@ -10,11 +10,12 @@ import type { WorkAction } from "../src/store/thread-work.js";
 vi.mock("../app/Detail.js", () => ({ IssueDetail: ({ issueId }: { issueId: string }) =>
   React.createElement("p", { "data-testid": "detail" }, issueId) }));
 
-let HeaderChip: typeof import("../app/HeaderChip.js").HeaderChip;
+let ThreadChip: typeof import("../app/ThreadChip.js").ThreadChip;
+let useThreadChipVisible: typeof import("../app/ThreadChip.js").useThreadChipVisible;
 let IssuePanel: typeof import("../app/IssuePanel.js").IssuePanel;
 beforeAll(async () => {
   installTestPluginRuntime();
-  HeaderChip = (await import("../app/HeaderChip.js")).HeaderChip;
+  ({ ThreadChip, useThreadChipVisible } = await import("../app/ThreadChip.js"));
   IssuePanel = (await import("../app/IssuePanel.js")).IssuePanel;
 });
 afterEach(cleanup);
@@ -39,14 +40,14 @@ function fixture() {
     store.changeThreadWork({ threadId: "t", action, now: NOW + 10, expectedRevision,
       ...(id === null ? {} : { issue: link(store.issueByIdentifier(id)?.id ?? id) }) }));
   const component = () => React.createElement(React.Fragment, null,
-    React.createElement(HeaderChip, { threadId: "t", projectId: "p", isCompactViewport: true }),
+    React.createElement(ThreadChip, { threadId: "t" }),
     React.createElement(IssuePanel, { threadId: "t", params: null }));
   const slot = renderSlot({ component }, {}, { rpc: { threadIssue: read, updateThreadWork: update } });
   return { slot, store, update };
 }
 
 describe("thread work UI", () => {
-  it("updates the header and panel on focus and completion without reopening", async () => {
+  it("updates the chip and panel on focus and completion without reopening", async () => {
     const { slot, store } = fixture();
     await slot.findByRole("button", { name: /2 active Linear issues. Current issue ENG-1/ });
     expect(slot.getByText("+1")).toBeTruthy();
@@ -83,5 +84,29 @@ describe("thread work UI", () => {
     await slot.findByRole("status");
     expect(slot.getByRole("status").textContent).toContain("Thread work changed");
     expect(store.threadLink("t")).toBeNull();
+  });
+
+  it("hides the chip's context segment while it has nothing to say", async () => {
+    const { slot, store } = fixture();
+    const Probe = () => React.createElement("p", { "data-testid": "visible" }, String(useThreadChipVisible({ threadId: "t" })));
+    let answered = false;
+    const probe = renderSlot({ component: Probe }, {}, { rpc: { threadIssue: async () => {
+      answered = true;
+      return { binding: null, suggestion: null, alternates: [], historyCount: 0, active: [], activeCount: 0, history: [], revision: 0 };
+    } } });
+    // Loading: no segment.
+    expect(probe.getByTestId("visible").textContent).toBe("false");
+    // Answered with nothing bound: still no segment, so bb draws no empty card.
+    await waitFor(() => expect(answered).toBe(true));
+    await act(async () => {});
+    expect(probe.getByTestId("visible").textContent).toBe("false");
+    // A bound thread shows it.
+    const bound = renderSlot({ component: () => React.createElement("p", { "data-testid": "bound" },
+      String(useThreadChipVisible({ threadId: "t" }))) }, {}, { rpc: { threadIssue: async () => {
+        const entry = (await import("../src/thread-issues.js")).threadIssuesFor({ threadIds: ["t"], store, suggestions: new Map() }).t!;
+        return { ...entry, history: [], historyCount: 0, revision: 1, alternates: [] };
+      } } });
+    await waitFor(() => expect(bound.getByTestId("bound").textContent).toBe("true"));
+    slot.unmount?.();
   });
 });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
-import { Markdown, useBbNavigate, useRealtime } from "@bb/plugin-sdk/app";
+import { Markdown, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";

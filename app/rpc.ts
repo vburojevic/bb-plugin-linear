@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRpc } from "@bb/plugin-sdk/app";
+import { useRpc } from "@get-bb/plugin-sdk/app";
 import type { serverRpcContract } from "../src/rpc.js";
 
 type LinearRpcContract = typeof serverRpcContract;

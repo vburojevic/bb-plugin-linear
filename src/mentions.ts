@@ -1,4 +1,4 @@
-import type { BbPluginApi, PluginMentionItem } from "@bb/plugin-sdk";
+import type { BbPluginApi, PluginMentionItem } from "@get-bb/plugin-sdk";
 import { scopeFor } from "./bindings.js";
 import { truncate } from "./format.js";
 import { safeIssueReference, UNTRUSTED_LINEAR_POLICY } from "./security-boundaries.js";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PluginMentionProviderRegistration } from "@bb/plugin-sdk";
+import type { PluginMentionProviderRegistration } from "@get-bb/plugin-sdk";
 import { registerMentionProviders } from "../src/mentions.js";
 import { toolsFor, UNBOUND_INSTRUCTION } from "../src/tools.js";
 import { teamContextText } from "../src/tools-format.js";

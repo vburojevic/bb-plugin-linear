@@ -1,5 +1,5 @@
 import { WORK_ACTIONS, type WorkAction } from "./store/thread-work.js";
-import type { PluginCliCommandInfo, PluginCliContext, PluginCliResult } from "@bb/plugin-sdk";
+import type { PluginCliCommandInfo, PluginCliContext, PluginCliResult } from "@get-bb/plugin-sdk";
 import { flagBoolean, parseArgs, type ParsedArgs } from "./cli-args.js";
 import { fail, json, ok, table } from "./cli-format.js";
 import { describeError } from "./linear/errors.js";

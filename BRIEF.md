@@ -192,10 +192,13 @@ skill teaches conventions. Beat: context-only tools (useless to users
 without MCP — and this is a public plugin) and mirroring MCP's exact tool
 list (their shapes, our worse fit).
 
-**D9 — Surfaces.** `navPanel` (the client), `experimental_threadHeaderAction`
-(one 28px chip: key + state dot + truncated title; unbound-with-candidate
-renders the suggestion; everything bigger in a portaled popover),
-`threadPanelAction` (issue detail: description, controls, parent, sub-issues,
+**D9 — Surfaces.** `navPanel` (the client), `experimental_threadContextSegment`
+(one 24px chip in the context row above the composer: key + state dot;
+unbound-with-candidate renders the suggestion; hidden when it has nothing to
+say; bb leaves plugin segments out of archived threads; until bb 0.49 this was
+`experimental_threadHeaderAction` in the thread header),
+`experimental_tab` with `availability: "action"` (issue detail, formerly
+`threadPanelAction`: description, controls, parent, sub-issues,
 relations, resources, customer requests, subscribers, reactions, comments and
 an exact-parity activity timeline — also openable for any issue named in chat),
 `settingsSection` (accounts: per-key discovered identity, connection health),
@@ -253,10 +256,10 @@ src/
   cli/                bb linear subcommands (thin over the same modules)
   webhooks/           route handler, signature verification, replay guard
 app.tsx              slot registrations only
-app/                 nav panel views, header chip, issue panel, settings
+app/                 nav panel views, thread chip, issue panel, settings
 components/ui/       vendored shadcn (owned, editable)
 skills/linear/       agent conventions
-test/                vitest against @bb/plugin-sdk/testing
+test/                vitest against @get-bb/plugin-sdk/testing
 ```
 
 Rules: pure logic lives in `src/` modules testable without a host; `server.ts`

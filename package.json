@@ -9,8 +9,8 @@
     "url": "git+https://github.com/vburojevic/bb-plugin-linear.git"
   },
   "engines": {
-    "bb": ">=0.47",
-    "bbPluginSdk": "^0.4.16"
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
   },
   "bb": {
     "name": "Linear",
@@ -44,7 +44,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@get-bb/plugin-sdk": "^0.4.17",
+    "@get-bb/plugin-sdk": "0.6.132",
     "@radix-ui/react-alert-dialog": "^1.1.23",
     "@radix-ui/react-context-menu": "^2.3.7",
     "@radix-ui/react-dialog": "^1.1.19",

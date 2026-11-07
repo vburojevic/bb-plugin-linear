@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBbNavigate, useRealtime } from "@bb/plugin-sdk/app";
+import { useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { ArchiveDialog } from "./ArchiveDialog.js";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  parsePluginAgentToolPresentation,
-  rejectStaleAgentToolFields,
+  normalizeAgentToolRegistration,
+  parsePluginRowPresentation,
 } from "@get-bb/plugin-sdk/internal/host-policy";
 import { registerTools } from "../src/tools.js";
 
@@ -12,6 +12,11 @@ import { registerTools } from "../src/tools.js";
  * the same code that runs at startup — so the failure is caught here, not by a
  * reviewer installing the plugin.
  */
+
+/** The SDK's own registration path: stale fields, presentation, parameters. */
+function register(tool: any) {
+  return normalizeAgentToolRegistration({ pluginId: "linear", declaredIconNames: new Set(), tool } as never);
+}
 function registeredTools(): any[] {
   const tools: any[] = [];
   const bb: any = {
@@ -32,12 +37,9 @@ describe("agent tools satisfy the SDK host policy", () => {
     expect(tools.length).toBeGreaterThan(0);
   });
 
-  it("carries no renamed or unknown experimental_ fields", () => {
+  it("passes the SDK's registration policy, with no renamed or unknown experimental_ fields", () => {
     for (const tool of tools) {
-      expect(
-        () => rejectStaleAgentToolFields(tool.name, tool),
-        `tool "${tool.name}"`,
-      ).not.toThrow();
+      expect(() => register(tool), `tool "${tool.name}"`).not.toThrow();
     }
   });
 
@@ -46,7 +48,7 @@ describe("agent tools satisfy the SDK host policy", () => {
     expect(labelled.length).toBeGreaterThan(0);
 
     for (const tool of labelled) {
-      const parsed = parsePluginAgentToolPresentation(tool.name, tool.presentation);
+      const parsed = register(tool).presentation as any;
       // The parser drops keys it does not know, so a misspelled field would
       // leave the tool activating with no label at all rather than failing.
       expect(parsed?.label, `tool "${tool.name}" kept its label`).toBeDefined();
@@ -68,22 +70,25 @@ describe("agent tools satisfy the SDK host policy", () => {
 describe("the shapes that silently lose labels", () => {
   it("rejects the pre-0.4.16 experimental_statusLabels field", () => {
     expect(() =>
-      rejectStaleAgentToolFields("linear_team_context", {
+      register({
         name: "linear_team_context",
+        description: "Read the team.",
+        parameters: { type: "object", properties: {} },
+        execute: async () => "",
         experimental_statusLabels: { pending: "Reading", completed: "Read" },
       }),
     ).toThrow(/experimental_statusLabels/);
   });
 
   it("drops presentation.labels — the plural spelling keeps no label", () => {
-    const parsed = parsePluginAgentToolPresentation("linear_team_context", {
+    const parsed = parsePluginRowPresentation("tool \"linear_team_context\"", {
       labels: { pending: "Reading", completed: "Read" },
     } as never);
     expect(parsed?.label).toBeUndefined();
   });
 
   it("keeps presentation.label — the spelling this plugin ships", () => {
-    const parsed = parsePluginAgentToolPresentation("linear_team_context", {
+    const parsed = parsePluginRowPresentation("tool \"linear_team_context\"", {
       label: { pending: "Reading", completed: "Read" },
     });
     expect(parsed?.label).toEqual({ pending: "Reading", completed: "Read" });
