@@ -178,6 +178,22 @@ describe("bb linear", () => {
     expect(seen["projectId"]).toBe("proj_from_cwd");
   });
 
+  it("reads set --bb-project as the bb project, over the one it was run from", async () => {
+    // Run from outside any bb project with several bound, `set` has nothing
+    // to infer the bb project from, and `--project` is already the Linear one.
+    let seen: Record<string, unknown> = {};
+    await createCliRunner(
+      environment({
+        set: async (args) => {
+          seen = args as unknown as Record<string, unknown>;
+          return { ok: true, message: "ok" };
+        },
+      }),
+    )(["set", "ENG-1", "--project", "Q4 Roadmap", "--bb-project", "proj_named"], CTX);
+    expect(seen["project"]).toBe("Q4 Roadmap");
+    expect(seen["projectId"]).toBe("proj_named");
+  });
+
   it("needs a title to create an issue", async () => {
     const result = await createCliRunner(environment())(["create"], CTX);
     expect(result.exitCode).toBe(1);

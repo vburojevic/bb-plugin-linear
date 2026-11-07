@@ -4363,7 +4363,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
        * refused by listing the candidates rather than by guessing.
        */
       set: async (args) => {
-        const target = await resolveForWrite(args.identifier, args.projectId);
+        const target = await resolveForWrite(args.identifier, args.projectId, "--bb-project");
         if ("message" in target) return { ok: false, message: target.message };
         const issue = target.issue;
 
@@ -4980,6 +4980,9 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
     async function resolveForWrite(
       identifier: string,
       projectId: string | undefined,
+      // The flag that names the bb project. `set` spells it `--bb-project`,
+      // because its `--project` is the Linear project to move the issue into.
+      projectFlag: "--project" | "--bb-project" = "--project",
     ): Promise<{ issue: NonNullable<ReturnType<Store["issue"]>>; team: { name: string } } | { message: string }> {
       const boundProjects = [...new Set(bindingSnapshot.map((row) => row.projectId))];
       const resolved = projectId ?? (boundProjects.length === 1 ? boundProjects[0] : undefined);
@@ -4988,7 +4991,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
           message:
             boundProjects.length === 0
               ? "No bb project is bound to a Linear team. Bind one first: bb linear bind <TEAM-KEY> --project <id>"
-              : "More than one project is bound, so name one with --project <id>.",
+              : `More than one project is bound, so name one with ${projectFlag} <id>.`,
         };
       }
 

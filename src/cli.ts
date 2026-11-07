@@ -217,7 +217,7 @@ export const CLI_COMMANDS: readonly PluginCliCommandInfo[] = [
     name: "set",
     summary: "Change an issue's priority, estimate, due date, project, cycle, title or labels",
     usage:
-      "bb linear set <ENG-123> [--priority 0-4] [--estimate <n>] [--due YYYY-MM-DD|none] [--project <name|none>] [--cycle <name|none>] [--title <text>] [--label +name|-name]",
+      "bb linear set <ENG-123> [--priority 0-4] [--estimate <n>] [--due YYYY-MM-DD|none] [--project <name|none>] [--cycle <name|none>] [--title <text>] [--label +name|-name] [--bb-project <id>]",
   },
   {
     name: "comment",
@@ -558,7 +558,9 @@ export function createCliRunner(env: CliEnvironment): CliRunner {
             // so it cannot also name the bb project. Reading it twice scoped
             // the lookup to a bb project called e.g. "Q4 Roadmap", which has
             // no team binding, and every `--project` came back "No issue".
-            projectId: ctx.projectId,
+            // `--bb-project` names the bb project when there is no folder or
+            // thread to infer it from.
+            projectId: flagString(args, "bb-project") ?? ctx.projectId,
           });
           return result.ok ? ok(`${result.message}\n`) : fail(`${result.message}\n`);
         }
