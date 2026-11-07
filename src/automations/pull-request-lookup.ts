@@ -31,14 +31,29 @@ const environmentPullRequestSchema = z.discriminatedUnion("outcome", [
 
 export const pullRequestsOutputSchema = z.record(z.string(), environmentPullRequestSchema);
 
+/** `refresh` resolves once the saved row is current; its answer carries nothing else. */
+export const refreshOutputSchema = z.object({ ok: z.literal(true) });
+
 export type PullRequestLookup = z.infer<typeof environmentPullRequestSchema>;
 
-export type PullRequestsRpc = (args: {
+/** The slice of `bb.sdk.plugins.callRpc` this module uses. */
+export type GithubPrStatusRpc = <T>(args: {
   pluginId: string;
-  method: string;
-  input: { keys: string[] };
-  outputSchema: typeof pullRequestsOutputSchema;
-}) => Promise<z.infer<typeof pullRequestsOutputSchema>>;
+  method: "pullRequests" | "refresh";
+  input: { keys: string[] } | { environmentId: string };
+  outputSchema: z.ZodType<T>;
+}) => Promise<T>;
+
+export interface LookupOptions {
+  /**
+   * Re-check GitHub before reading. GitHub PR Status answers another plugin's
+   * read from its saved row while that row is under 10 seconds old, so a turn
+   * that merged the pull request a few seconds after the row was saved would
+   * still read `open`. When that turn was the thread's last, nothing would
+   * ever look again and the issue would never move.
+   */
+  readonly fresh?: boolean;
+}
 
 /**
  * One environment's pull request, as one of the three outcomes.
@@ -49,10 +64,21 @@ export type PullRequestsRpc = (args: {
  * not read "couldn't ask" as "no pull request exists".
  */
 export async function lookupPullRequest(
-  callRpc: PullRequestsRpc,
+  callRpc: GithubPrStatusRpc,
   environmentId: string,
+  options: LookupOptions = {},
 ): Promise<PullRequestLookup> {
   try {
+    if (options.fresh === true) {
+      // A failed re-check is not a failed lookup: the read below still
+      // answers, from the saved row or with its own `unavailable`.
+      await callRpc({
+        pluginId: GITHUB_PR_STATUS_PLUGIN_ID,
+        method: "refresh",
+        input: { environmentId },
+        outputSchema: refreshOutputSchema,
+      }).catch(() => undefined);
+    }
     const rows = await callRpc({
       pluginId: GITHUB_PR_STATUS_PLUGIN_ID,
       method: "pullRequests",

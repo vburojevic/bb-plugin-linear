@@ -3,7 +3,7 @@ import {
   GITHUB_PR_STATUS_PLUGIN_ID,
   lookupPullRequest,
   pullRequestsOutputSchema,
-  type PullRequestsRpc,
+  type GithubPrStatusRpc,
 } from "../src/automations/pull-request-lookup.js";
 
 /** A row as bb's GitHub PR Status plugin actually returns it, extra fields and all. */
@@ -26,16 +26,19 @@ const MERGED_ROW = {
   },
 };
 
+type PeerCall = Parameters<GithubPrStatusRpc>[0];
+
 /** Behaves like `bb.sdk.plugins.callRpc`: the output schema parses the peer's answer. */
-function peer(answer: () => unknown): { rpc: PullRequestsRpc; calls: Parameters<PullRequestsRpc>[0][] } {
-  const calls: Parameters<PullRequestsRpc>[0][] = [];
-  return {
-    calls,
-    rpc: async (args) => {
-      calls.push(args);
-      return args.outputSchema.parse(answer());
-    },
-  };
+function peer(
+  answer: () => unknown,
+  refresh: () => unknown = () => ({ ok: true }),
+): { rpc: GithubPrStatusRpc; calls: PeerCall[] } {
+  const calls: PeerCall[] = [];
+  const rpc = (async (args: PeerCall) => {
+    calls.push(args);
+    return args.outputSchema.parse(args.method === "refresh" ? refresh() : answer());
+  }) as GithubPrStatusRpc;
+  return { calls, rpc };
 }
 
 describe("lookupPullRequest", () => {
@@ -92,5 +95,33 @@ describe("lookupPullRequest", () => {
     expect(fromDisabled.outcome).toBe("unavailable");
     expect(fromDisabled.outcome === "unavailable" && fromDisabled.message).toContain("is disabled");
     expect((await lookupPullRequest(reshaped.rpc, "env_1")).outcome).toBe("unavailable");
+  });
+
+  it("re-checks GitHub before reading only when asked for a fresh answer", async () => {
+    const cached = peer(() => ({ env_1: MERGED_ROW }));
+    await lookupPullRequest(cached.rpc, "env_1");
+    expect(cached.calls.map((call) => call.method)).toEqual(["pullRequests"]);
+
+    const fresh = peer(() => ({ env_1: MERGED_ROW }));
+    const result = await lookupPullRequest(fresh.rpc, "env_1", { fresh: true });
+    expect(fresh.calls.map((call) => [call.method, call.input])).toEqual([
+      ["refresh", { environmentId: "env_1" }],
+      ["pullRequests", { keys: ["env_1"] }],
+    ]);
+    expect(result.outcome).toBe("available");
+  });
+
+  it("still answers from the saved row when the re-check fails", async () => {
+    const { rpc, calls } = peer(
+      () => ({ env_1: MERGED_ROW }),
+      () => {
+        throw new Error("Unknown RPC method refresh");
+      },
+    );
+
+    const result = await lookupPullRequest(rpc, "env_1", { fresh: true });
+
+    expect(calls.map((call) => call.method)).toEqual(["refresh", "pullRequests"]);
+    expect(result.outcome).toBe("available");
   });
 });
