@@ -917,11 +917,16 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         notice: panelNotice(),
         ...(includeBbFacts
           ? {
+              // Every issue that can carry a fact: the ones with a thread, a
+              // branch or a pull request on this machine. Taking the most
+              // recently updated issues instead left an older issue with a
+              // running thread without its fact on a busy team.
               bbFacts: bbFactsFor(
                 store
                   .queryIssues({
                     teamIds: boundTeamIds,
                     includeCompleted: true,
+                    withBbWork: true,
                     sort: "updated",
                     limit: 500,
                   })

@@ -166,6 +166,9 @@ export interface IssueFilter {
   readonly includeArchived?: boolean;
   /** Default false. The panel's baseline is open work. */
   readonly includeCompleted?: boolean;
+  /** Only issues with bb work on this machine: an active thread, or a branch
+   *  or pull request resolved to them. */
+  readonly withBbWork?: boolean;
 }
 
 export interface IssueQuery extends IssueFilter {
@@ -547,6 +550,13 @@ export function createStore(db: Database): Store {
 
     if (!filter.includeCompleted) {
       clauses.push(`(state.type IS NULL OR state.type NOT IN ('completed', 'canceled'))`);
+    }
+
+    if (filter.withBbWork) {
+      clauses.push(`(
+        EXISTS (SELECT 1 FROM thread_work WHERE thread_work.issue_id = issue.id AND thread_work.status = 'active')
+        OR EXISTS (SELECT 1 FROM pr_state WHERE pr_state.issue_id = issue.id)
+      )`);
     }
 
     const inClause = (column: string, values: readonly string[] | undefined) => {
