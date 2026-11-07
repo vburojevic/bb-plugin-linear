@@ -7,8 +7,8 @@
  *
  * Two rules run through all of it.
  *
- * **`unavailable` is not `absent`.** bb's `environments.pullRequest` returns a
- * three-outcome union and its own doc comment says why: "'unavailable' means
+ * **`unavailable` is not `absent`.** bb's GitHub PR Status plugin returns a
+ * three-outcome union, and bb's original lookup documented why: "'unavailable' means
  * the lookup itself failed (gh missing, not authenticated, timeout,
  * unreachable workspace), so callers must not render it as 'no PR exists'."
  * They are separate cases here and named separately, so nobody can collapse

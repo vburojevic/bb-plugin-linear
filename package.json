@@ -9,7 +9,7 @@
     "url": "git+https://github.com/vburojevic/bb-plugin-linear.git"
   },
   "engines": {
-    "bb": ">=0.37",
+    "bb": ">=0.47",
     "bbPluginSdk": "^0.4.16"
   },
   "bb": {

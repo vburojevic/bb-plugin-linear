@@ -10,6 +10,7 @@ import {
   type AutomationState,
   type PullRequestOutcome,
 } from "./pr-transition.js";
+import type { PullRequestLookup } from "./pull-request-lookup.js";
 
 /**
  * The impure half of automation 2: resolve the branch, read the team's
@@ -46,22 +47,8 @@ export interface PrRunnerDeps {
   readonly mutations: MutationDeps;
   readonly now: () => number;
   readonly log?: (level: "debug" | "info" | "warn", message: string) => void;
-  /** `bb.sdk.environments.pullRequest`, narrowed to the three outcomes. */
-  readonly lookupPullRequest: (environmentId: string) => Promise<
-    | {
-        outcome: "available";
-        pullRequest: {
-          number: number;
-          title: string;
-          state: "draft" | "open" | "merged" | "closed";
-          url: string;
-          baseRefName: string;
-          attention: string;
-        };
-      }
-    | { outcome: "absent" }
-    | { outcome: "unavailable"; message: string }
-  >;
+  /** The environment's pull request, from bb's GitHub PR Status plugin. */
+  readonly lookupPullRequest: (environmentId: string) => Promise<PullRequestLookup>;
 }
 
 export type RunOutcome =

@@ -79,6 +79,7 @@ import { issueNeedsRefresh, registerTools } from "./src/tools.js";
 import { fetchLinearImage, resolveImageAccess } from "./src/image-proxy.js";
 import type { TimelineVocabulary } from "./src/select/timeline.js";
 import { runPrTransition, type PrRunnerDeps } from "./src/automations/pr-runner.js";
+import { lookupPullRequest, type LookupOptions } from "./src/automations/pull-request-lookup.js";
 import { startThreadFromIssue, type StartDeps } from "./src/automations/start.js";
 import {
   effectiveAgentWrites,
@@ -851,7 +852,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       // user's own prompts instead.
       lifetime.detach("binding", async () => {
         await evaluateThreadBinding(thread.id);
-        await runTransitionForThread(thread.id);
+        await runTransitionForThread(thread.id, { fresh: true });
       });
     });
     for (const event of ["thread.failed", "thread.archived", "thread.deleted"] as const) {
@@ -2731,7 +2732,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       }
     }
 
-    async function prDepsNow(): Promise<PrRunnerDeps> {
+    async function prDepsNow(lookup: LookupOptions = {}): Promise<PrRunnerDeps> {
       const slots = await activeSlots();
       return {
         clients: slots.map((entry) => clientForSlot(entry.slot)),
@@ -2744,14 +2745,19 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
         now,
         log: (level, message) => lifetime.log(level, message),
         lookupPullRequest: (environmentId) =>
-          bb.sdk.environments.pullRequest({ environmentId }) as never,
+          lookupPullRequest((args) => bb.sdk.plugins.callRpc(args), environmentId, lookup),
       };
     }
 
     /** Runs on `thread.active` and `thread.idle` for threads whose
      *  environment has a branch. Never in a tight loop — the lookup shells
-     *  out to `gh`. */
-    async function runTransitionForThread(threadId: string): Promise<void> {
+     *  out to `gh`. `fresh` re-checks GitHub first; the idle run asks for it
+     *  because a turn that just merged the pull request may be the thread's
+     *  last, and a stale `open` then would never be read again. */
+    async function runTransitionForThread(
+      threadId: string,
+      lookup: LookupOptions = {},
+    ): Promise<void> {
       const values = await settings.get();
       // The transport would refuse anyway; checking here first keeps a
       // consent-off install from paying gh lookups for moves it cannot make.
@@ -2768,7 +2774,7 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
       const link = store.threadLink(threadId);
       if (link !== null) await ensureAutomationConfig(link.teamId);
 
-      const outcome = await runPrTransition(await prDepsNow(), {
+      const outcome = await runPrTransition(await prDepsNow(lookup), {
         environmentId,
         branchName: environment.branchName ?? null,
         enabled: true,

@@ -7,7 +7,7 @@
  * DevOps and self-hosted anything.
  *
  * Used for display and for the Linear attachment URL — **not** for pull-request
- * transitions, which go through bb's own `environments.pullRequest` and are
+ * transitions, which go through bb's GitHub PR Status plugin and are
  * therefore `gh`-gated whatever this returns.
  *
  * The cases that actually appear and that a naive `owner/repo` split gets
