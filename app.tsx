@@ -1,16 +1,17 @@
 // bb-plugin-linear — frontend entry. Registration only; views live in app/.
 import "./app.css";
 import { useCallback } from "react";
-import { definePluginApp, useBbNavigate, useRealtime } from "@bb/plugin-sdk/app";
+import { definePluginApp, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Icon } from "@/components/ui/icon";
 import { LinearDirective } from "./app/Directive.js";
-import { HeaderChip } from "./app/HeaderChip.js";
+import { ThreadChip } from "./app/ThreadChip.js";
 import { IssuePanel } from "./app/IssuePanel.js";
 import { LinearPanel } from "./app/Panel.js";
 import { LinearPanelHeader } from "./app/PanelHeader.js";
 import { useAsync, useLinearRpc } from "./app/rpc.js";
+import { ISSUE_TAB } from "./app/tabs.js";
 import { identifiersInText } from "./src/select/identifiers.js";
 
 function ConnectionCard() {
@@ -84,15 +85,27 @@ export default definePluginApp((app) => {
     component: ConnectionCard,
   });
 
-  app.slots.experimental_threadHeaderAction({
+  /*
+   * Which issue this thread works on, in the context row above the composer:
+   * the row where bb already shows the parent thread, the changed files and
+   * the pull request. The issue belongs beside its pull request. A header
+   * button would share one split button with the Git plugin's Commit, which
+   * hides it whenever the thread has uncommitted changes.
+   */
+  app.slots.experimental_threadContextSegment({
     id: "issue-chip",
     title: "Linear issue",
-    component: HeaderChip,
+    group: "2_linear",
+    summary: ThreadChip,
   });
 
-  app.slots.threadPanelAction({
-    id: "issue",
+  /* The issue tab, opened from the chip, a message, or a `::linear` directive. */
+  app.slots.experimental_tab({
+    context: { kind: "thread" },
+    availability: "action",
+    id: ISSUE_TAB.id,
     title: "Linear issue",
+    icon: "Layers",
     component: IssuePanel,
   });
 
@@ -109,19 +122,19 @@ export default definePluginApp((app) => {
     id: "open-issue",
     title: "Open in Linear",
     icon: "Layers",
-    run: ({ threadId: _threadId, message, selectedText, openPanel }) => {
+    run: ({ message, selectedText, experimental_panel }) => {
       const source =
         selectedText !== undefined && selectedText !== "" ? selectedText : message.text;
       const { identifiers } = identifiersInText(source);
       if (identifiers.length === 0) {
         // No identifier named is not a failure: fall back to this thread's
         // own issue, which is what "Linear" means on such a message.
-        openPanel({ actionId: "issue" });
+        experimental_panel.openTab({ tab: ISSUE_TAB });
         return;
       }
       for (const identifier of identifiers) {
-        openPanel({
-          actionId: "issue",
+        experimental_panel.openTab({
+          tab: ISSUE_TAB,
           title: identifier,
           params: { issueId: identifier },
         });

@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { PluginKvStorage } from "@bb/plugin-sdk";
+import type { PluginKvStorage } from "@get-bb/plugin-sdk";
 
 /**
  * Typed, versioned access to `bb.storage.kv`.

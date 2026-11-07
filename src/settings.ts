@@ -27,7 +27,7 @@
  * the absence of `updateSettings` in this repository.
  */
 
-import type { PluginSettingDescriptors, PluginSettingsValues } from "@bb/plugin-sdk";
+import type { PluginSettingDescriptors, PluginSettingsValues } from "@get-bb/plugin-sdk";
 
 export const SETTING_DESCRIPTORS = {
   apiKey: {

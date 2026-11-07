@@ -11,7 +11,6 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   resolve: { alias: {
-    "@bb/plugin-sdk/app": "@get-bb/plugin-sdk/app",
     "@": new URL(".", import.meta.url).pathname,
   } },
   test: {

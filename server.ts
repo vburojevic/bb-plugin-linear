@@ -1,5 +1,5 @@
 import { collectThreadEvidence } from "./src/thread-evidence.js";
-import type { BbPluginApi } from "@bb/plugin-sdk";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 import {
@@ -3076,8 +3076,11 @@ export function createPlugin(makeClient: LinearClientFactory = createLinearClien
      */
     async function userMessagesFor(threadId: string) {
       const work = store.threadWorkState(threadId);
+      // bb 0.49 dropped `afterSequence` from the timeline query and ignores
+      // it, so the read is the latest page; `collectThreadEvidence` keeps
+      // only rows past the durable cursor, which it always did.
       const timeline = await lifetime.runAsync("timeline", () => bb.sdk.threads.timeline({
-        threadId, afterSequence: String(work.afterSequence),
+        threadId,
       }), null);
       return timeline === null ? { messages: [], afterSequence: work.afterSequence } :
         collectThreadEvidence(timeline.rows, work.afterSequence);

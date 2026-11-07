@@ -5,7 +5,7 @@ import { createCliRunner, type CliEnvironment } from "../src/cli.js";
 import { connectedState } from "../src/select/connection.js";
 import type { StatusReport } from "../src/select/status.js";
 import type { ViewerResult } from "../src/linear/types.js";
-import type { PluginCliContext } from "@bb/plugin-sdk";
+import type { PluginCliContext } from "@get-bb/plugin-sdk";
 
 const NOW = 1_700_000_000_000;
 

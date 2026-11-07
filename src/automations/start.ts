@@ -1,4 +1,4 @@
-import type { BbPluginApi } from "@bb/plugin-sdk";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { scopeFor } from "../bindings.js";
 import { describeError } from "../linear/errors.js";
 import type { LinearClient } from "../linear/client.js";

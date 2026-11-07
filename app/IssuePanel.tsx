@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
-import { useRealtime } from "@bb/plugin-sdk/app";
-import type { JsonValue } from "@bb/plugin-sdk/app";
+import { useRealtime } from "@get-bb/plugin-sdk/app";
+import type { JsonValue } from "@get-bb/plugin-sdk/app";
 import { IssueDetail } from "./Detail.js";
 import { useAsync, useLinearRpc } from "./rpc.js";
 import { ThreadWorkControls } from "./ThreadWorkControls.js";

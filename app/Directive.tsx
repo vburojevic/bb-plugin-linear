@@ -1,8 +1,9 @@
 import { useCallback, type CSSProperties } from "react";
-import type { PluginMessageDirectiveProps } from "@bb/plugin-sdk/app";
-import { useBbNavigate } from "@bb/plugin-sdk/app";
+import type { PluginMessageDirectiveProps } from "@get-bb/plugin-sdk/app";
+import { experimental_useAppPanel } from "@get-bb/plugin-sdk/app";
 import { StateGlyph } from "./StateGlyph.js";
 import { useAsync, useLinearRpc } from "./rpc.js";
+import { ISSUE_TAB } from "./tabs.js";
 import { toneClass } from "../src/select/tone.js";
 
 /**
@@ -23,7 +24,7 @@ export function LinearDirective({ attributes, source }: PluginMessageDirectivePr
 
 function DirectiveCard({ identifier, source }: { identifier: string; source: string }) {
   const rpc = useLinearRpc();
-  const navigate = useBbNavigate();
+  const panel = experimental_useAppPanel();
   const state = useAsync(
     useCallback(async () => rpc.call("issue", { id: identifier }), [rpc, identifier]),
     [identifier],
@@ -43,8 +44,8 @@ function DirectiveCard({ identifier, source }: { identifier: string; source: str
       className={`${toneClass(detail.tone)} inline-flex max-w-full items-center gap-1.5 rounded-md border border-border bg-card px-1.5 py-0.5 align-middle text-[13px] hover:bg-accent`}
       style={detail.stateColor === null ? undefined : ({ "--bbl": detail.stateColor } as CSSProperties)}
       onClick={() => {
-        navigate.openThreadPanel({
-          actionId: "issue",
+        panel.openTab({
+          tab: ISSUE_TAB,
           title: detail.identifier,
           params: { issueId: detail.identifier },
         });

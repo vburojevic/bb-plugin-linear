@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useBbNavigate } from "@bb/plugin-sdk/app";
+import { useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {

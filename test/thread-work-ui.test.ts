@@ -10,11 +10,11 @@ import type { WorkAction } from "../src/store/thread-work.js";
 vi.mock("../app/Detail.js", () => ({ IssueDetail: ({ issueId }: { issueId: string }) =>
   React.createElement("p", { "data-testid": "detail" }, issueId) }));
 
-let HeaderChip: typeof import("../app/HeaderChip.js").HeaderChip;
+let ThreadChip: typeof import("../app/ThreadChip.js").ThreadChip;
 let IssuePanel: typeof import("../app/IssuePanel.js").IssuePanel;
 beforeAll(async () => {
   installTestPluginRuntime();
-  HeaderChip = (await import("../app/HeaderChip.js")).HeaderChip;
+  ThreadChip = (await import("../app/ThreadChip.js")).ThreadChip;
   IssuePanel = (await import("../app/IssuePanel.js")).IssuePanel;
 });
 afterEach(cleanup);
@@ -39,14 +39,14 @@ function fixture() {
     store.changeThreadWork({ threadId: "t", action, now: NOW + 10, expectedRevision,
       ...(id === null ? {} : { issue: link(store.issueByIdentifier(id)?.id ?? id) }) }));
   const component = () => React.createElement(React.Fragment, null,
-    React.createElement(HeaderChip, { threadId: "t", projectId: "p", isCompactViewport: true }),
+    React.createElement(ThreadChip, { threadId: "t" }),
     React.createElement(IssuePanel, { threadId: "t", params: null }));
   const slot = renderSlot({ component }, {}, { rpc: { threadIssue: read, updateThreadWork: update } });
   return { slot, store, update };
 }
 
 describe("thread work UI", () => {
-  it("updates the header and panel on focus and completion without reopening", async () => {
+  it("updates the chip and panel on focus and completion without reopening", async () => {
     const { slot, store } = fixture();
     await slot.findByRole("button", { name: /2 active Linear issues. Current issue ENG-1/ });
     expect(slot.getByText("+1")).toBeTruthy();

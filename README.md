@@ -7,7 +7,7 @@
 <p align="center">
   Linear inside <a href="https://getbb.app">bb</a> — issues, inbox, projects and cycles at
   parity for daily engineering work — and every bb thread <em>knowing which issue it is
-  working on</em>, live, in the header, the side panel, and the agent's own context.
+  working on</em>, live, above the composer, in the side panel, and in the agent's own context.
 </p>
 
 <p align="center">
@@ -60,8 +60,8 @@ create form with nine fields loses the race against a sticky note.
 ## The thread chip
 
 A thread tracks **active issues**, one **current issue**, and **previous work**.
-The header shows the current issue and a count of additional active issues,
-for example `ENG-42 +2`. The panel lets you focus, finish, remove, or resume
+The context row above the composer shows the current issue and a count of
+additional active issues, for example `ENG-42 +2`. The panel lets you focus, finish, remove, or resume
 work without losing its history. Opening an issue's detail does not change
 what the thread is working on.
 
