@@ -1,6 +1,6 @@
 <h1 align="center">Linear for bb</h1>
 
-<p align="center"><b>Your Linear issues, inbox, projects and cycles inside <a href="https://getbb.app">bb</a>,<br>and every thread knowing which issue it is working on.</b></p>
+<p align="center"><b>Your Linear issues, inbox, projects and cycles inside <a href="https://getbb.app">bb</a>, at parity for daily engineering work,<br>and every thread knowing, live, which issue it is working on.</b></p>
 
 <p align="center">
 <a href="https://github.com/vburojevic/bb-plugin-linear/releases/latest"><img src="https://img.shields.io/github/v/release/vburojevic/bb-plugin-linear?style=flat-square&label=release&color=57606a" alt="Latest release"></a>
@@ -76,7 +76,7 @@ Properties, sub-issues, relations, resources and Linear's activity timeline, wit
 <tr>
 <td width="50%" valign="top">
 
-**19 agent tools**<br>
+**Up to 19 agent tools**<br>
 The same `linear_*` tools in Claude, Codex, Kimi, OpenCode and Gemini threads, over one credential.
 
 </td>
@@ -96,7 +96,7 @@ Turn off "Allow changes to Linear" and every change is refused while every read 
   <img src="assets/readme/panel.png" width="100%" alt="The Linear panel's All issues list, grouped by state, with Done and Canceled folded behind a count">
 </picture>
 
-The left nav panel is a list-first Linear browser at sidebar width, rendered from a **local SQLite mirror**, so every read is instant, offline-tolerant, and free. Your team's board becomes collapsible state groups. Finished work starts folded behind a count, and open work gets the screen. Priorities mark only what deserves a mark: `!!` urgent, `!` high, nothing for the rest. The lead column shows what bb knows about each issue: a running thread, a branch, or a pull request.
+The left nav panel is a list-first Linear browser at sidebar width, rendered from a **local SQLite mirror**, so every read is instant, offline-tolerant, and free. Your team's board becomes collapsible state groups. Finished work starts folded behind a count, and open work gets the screen. Priorities mark only what deserves a mark: `!!` urgent, `!` high, nothing for the rest. When the list is grouped by state, the lead column shows what bb knows about each issue instead: a running thread, a branch, or a pull request.
 
 ## The Working set
 
@@ -201,20 +201,19 @@ Turn off "Allow changes to Linear" and every mutation (edits, comments, creation
 
 ## Agents get the real thing
 
-Nineteen `linear_*` tools over one credential, identical in Claude, Codex, Kimi, OpenCode and Gemini threads. They read the team's own vocabulary (states, labels, people, estimate scale, never guessed), search locally and escalate to Linear on request, and read and write in consolidated calls. They also include the tools no remote integration can have: this thread's **own work**, readable and writable. A bundled skill teaches the conventions.
+Up to nineteen `linear_*` tools over one credential, identical in Claude, Codex, Kimi, OpenCode and Gemini threads, in any project bound to a Linear team. They read the team's own vocabulary (states, labels, people, estimate scale, never guessed), search locally and escalate to Linear on request, and read and write in consolidated calls. They also include the tools no remote integration can have: this thread's **own work**, readable and writable. A bundled skill teaches the conventions.
 
 <details>
 <summary>The agent tools</summary>
 
-| Area | Tools |
+| Tools | Available at |
 | --- | --- |
-| Team and search | `linear_team_context`, `linear_search`, `linear_view_run` |
-| Read | `linear_issue_get`, `linear_issue_list`, `linear_project_list`, `linear_cycle_get` |
-| Comment | `linear_comment`, `linear_comment_react`, `linear_comment_edit` |
-| Write | `linear_issue_update`, `linear_issue_create`, `linear_issue_set_parent`, `linear_issue_relate`, `linear_issue_attach` |
-| This thread | `linear_thread_start`, `linear_thread_issue`, `linear_thread_work`, `linear_thread_bind` |
+| `linear_team_context`, `linear_search`, `linear_view_run`, `linear_issue_get`, `linear_issue_list`, `linear_project_list`, `linear_cycle_get` | Every setting |
+| `linear_thread_issue`, `linear_thread_work`, `linear_thread_bind` (these read and change bb's record of the thread's work, never Linear) | Every setting |
+| `linear_comment` | Comment and Full |
+| `linear_comment_react`, `linear_comment_edit`, `linear_issue_update`, `linear_issue_create`, `linear_issue_set_parent`, `linear_issue_relate`, `linear_issue_attach`, `linear_thread_start` | Full |
 
-"What agents may change in Linear" decides which writing tools agents get: **Off**, **Comment** (the default), or **Full**. Agents never get delete, archive or workspace administration at any setting.
+"What agents may change in Linear" picks the setting: **Off** (10 tools), **Comment**, the default (11), or **Full** (all 19). Agents never get delete, archive or workspace administration at any setting.
 
 </details>
 
@@ -229,7 +228,7 @@ flowchart LR
   T[bb threads] -- "branch, title and your messages" --> W[Thread work]
   W --> P
   W --> A
-  W -. "write-back, off by default" .-> L
+  W -. "status moves, per your settings" .-> L
 ```
 
 Reads come from the mirror. Writes go to Linear through one gated door and land back in the mirror.
@@ -240,7 +239,7 @@ Reads come from the mirror. Writes go to Linear through one gated door and land 
 - **Start a thread from any issue**: the row menu, the detail `···` menu, or `bb linear start ENG-42`. The thread spawns with the issue's description and recent comments as context, on the right project, with Linear's own branch name, bound from its first paint.
 - **Issues in chat**: `::linear{key="ENG-42"}` renders as a live issue chip in any message, and "Open in Linear" on a message resolves every identifier it names.
 - **Up to four workspaces**: each discovered from its own API key. Nothing is configured by hand, and cross-workspace ambiguity is refused by name rather than resolved by luck.
-- **Write-back automations, off by default**: a bound thread starting can lift the issue into the team's started state, and a merged PR can move it per the team's own Linear git automation. They are off because two writers fighting over one card is worse than either alone.
+- **Write-back automations, off by default**: a bound thread starting can lift the issue into the team's started state, and a merged PR can move it per the team's own Linear git automation. They are off because two writers fighting over one card is worse than either alone. Starting a thread *from* an issue does move it to started by default, because you asked for that work.
 - **Linear's own status icons**: the same ring, the same inner pie that grows with a state's position among the started states, the same disc with a check or an X, in each state's configured color. Parent issues carry Linear's sub-issue progress ring.
 - **Binds itself only on explicit evidence**: an issue key in a branch or thread title that names exactly one visible team binds the project to it, announced with an undo. Anything fuzzier becomes an offer in the panel, never a bind.
 - **Remote edits arrive hot**: a change made on linear.app promotes polling to seconds while somebody is watching, and a webhook delivery or local write wakes the poller instead of waiting out its sleep.
@@ -278,7 +277,7 @@ Every read answers from the local copy. Run any read with `--json` for machine o
 | Allow changes to Linear | On | Off makes the plugin read-only: every change is refused, every read keeps working. |
 | What agents may change in Linear | Comment | Off, Comment, or Full. See the agent tools above. |
 | Sync cadence | Balanced | Balanced polls a running thread's issue every 10 seconds and idles down to 10 minutes. Responsive halves every interval, Frugal doubles them. |
-| Webhook URL | | A public HTTPS URL that reaches this bb. Empty means polling, which always works. |
+| Webhook URL | | A public HTTPS URL that reaches this bb. Empty means polling, which always works. Creating a webhook needs a Linear workspace admin, and a bb connect share link will not work. |
 | Branch naming | Title | Title puts the identifier at the front of the thread title. Exact checks out Linear's branch name when it already exists and the tree is clean. |
 | Bind projects to teams automatically | On | Binds a bb project when an issue key names exactly one team, announced with an undo. |
 | Move the issue when a thread starts | On | Starting a thread from an issue moves it into the team's started state. |
@@ -286,7 +285,9 @@ Every read answers from the local copy. Run any read with `--json` for machine o
 | Move the issue when its pull request moves | Off | Follows the git automation your team configured in Linear. |
 | Comment on the issue when a thread starts | Off | Posts a comment on the issue saying a bb thread has started. |
 | Include sub-teams | Off | Also pulls the issues of a bound team's sub-teams. |
-| Notifications | On | Assigned to you; comments, replies and mentions; your issues blocked. |
+| Tell me when an issue is assigned to me | On | Notifies you in bb. |
+| Tell me about comments, replies and mentions | On | Notifies you in bb. |
+| Tell me when one of my issues is blocked | On | Notifies you in bb. |
 | Push plugin | | Sends notifications through a push plugin that implements `docs/push-contract.md`. |
 | OAuth client ID and secret | | Only for an organization with its own private Linear OAuth application. |
 
@@ -308,7 +309,7 @@ What bb already owns (threads, environments, worktrees, branch names, git state,
 
 It talks to Linear over the GraphQL API with its own credential rather than through Linear's MCP server. A background service cannot borrow an agent CLI's OAuth session, so it could not poll, notify, or move an issue when a pull request merges at 2am, and an MCP-only integration is invisible to every other provider bb runs. Where your agents *do* have Linear MCP, the write-back automations stay off by default so the two never fight.
 
-The [BRIEF](./BRIEF.md) records every decision with the alternative it beat.
+Built in the open: the [BRIEF](./BRIEF.md) records every decision with the alternative it beat.
 
 ## License
 
