@@ -24,15 +24,32 @@ import { toneClass } from "../src/select/tone.js";
  *  - **Nothing to say** — renders nothing. An empty affordance in every
  *    thread would be chrome for chrome's sake.
  */
-export function ThreadChip({ threadId }: Pick<ExperimentalThreadContextSegmentProps, "threadId">) {
+function useThreadIssue(threadId: string) {
   const rpc = useLinearRpc();
-  const panel = experimental_useAppPanel();
-
   const state = useAsync(
     useCallback(async () => rpc.call("threadIssue", { threadId }), [rpc, threadId]),
     [threadId],
   );
   useRealtime("linear:data", state.reload);
+  return state;
+}
+
+/**
+ * Whether the chip has anything to say. bb draws the context row's bordered
+ * card whenever one segment is visible, so a segment that is visible but
+ * renders nothing leaves an empty card above the composer. This is the
+ * chip's own render condition, from the same read.
+ */
+export function useThreadChipVisible({ threadId }: Pick<ExperimentalThreadContextSegmentProps, "threadId">): boolean {
+  const state = useThreadIssue(threadId);
+  if (state.status !== "ready") return false;
+  const { binding, suggestion, historyCount, alternates } = state.value;
+  return binding !== null || suggestion !== null || alternates.length > 0 || historyCount > 0;
+}
+
+export function ThreadChip({ threadId }: Pick<ExperimentalThreadContextSegmentProps, "threadId">) {
+  const panel = experimental_useAppPanel();
+  const state = useThreadIssue(threadId);
 
   if (state.status !== "ready") return null;
   const { binding, suggestion, activeCount, historyCount, alternates } = state.value;

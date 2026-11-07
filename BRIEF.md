@@ -194,7 +194,8 @@ list (their shapes, our worse fit).
 
 **D9 — Surfaces.** `navPanel` (the client), `experimental_threadContextSegment`
 (one 24px chip in the context row above the composer: key + state dot;
-unbound-with-candidate renders the suggestion; until bb 0.49 this was
+unbound-with-candidate renders the suggestion; hidden when it has nothing to
+say; bb leaves plugin segments out of archived threads; until bb 0.49 this was
 `experimental_threadHeaderAction` in the thread header),
 `experimental_tab` with `availability: "action"` (issue detail, formerly
 `threadPanelAction`: description, controls, parent, sub-issues,

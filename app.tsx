@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Icon } from "@/components/ui/icon";
 import { LinearDirective } from "./app/Directive.js";
-import { ThreadChip } from "./app/ThreadChip.js";
+import { ThreadChip, useThreadChipVisible } from "./app/ThreadChip.js";
 import { IssuePanel } from "./app/IssuePanel.js";
 import { LinearPanel } from "./app/Panel.js";
 import { LinearPanelHeader } from "./app/PanelHeader.js";
@@ -97,6 +97,9 @@ export default definePluginApp((app) => {
     title: "Linear issue",
     group: "2_linear",
     summary: ThreadChip,
+    // Hidden when the chip has nothing to say: a visible segment that renders
+    // nothing still makes bb draw an empty card above the composer.
+    useVisible: useThreadChipVisible,
   });
 
   /* The issue tab, opened from the chip, a message, or a `::linear` directive. */

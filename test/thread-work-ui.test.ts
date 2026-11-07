@@ -11,10 +11,11 @@ vi.mock("../app/Detail.js", () => ({ IssueDetail: ({ issueId }: { issueId: strin
   React.createElement("p", { "data-testid": "detail" }, issueId) }));
 
 let ThreadChip: typeof import("../app/ThreadChip.js").ThreadChip;
+let useThreadChipVisible: typeof import("../app/ThreadChip.js").useThreadChipVisible;
 let IssuePanel: typeof import("../app/IssuePanel.js").IssuePanel;
 beforeAll(async () => {
   installTestPluginRuntime();
-  ThreadChip = (await import("../app/ThreadChip.js")).ThreadChip;
+  ({ ThreadChip, useThreadChipVisible } = await import("../app/ThreadChip.js"));
   IssuePanel = (await import("../app/IssuePanel.js")).IssuePanel;
 });
 afterEach(cleanup);
@@ -83,5 +84,24 @@ describe("thread work UI", () => {
     await slot.findByRole("status");
     expect(slot.getByRole("status").textContent).toContain("Thread work changed");
     expect(store.threadLink("t")).toBeNull();
+  });
+
+  it("hides the chip's context segment while it has nothing to say", async () => {
+    const { slot, store } = fixture();
+    const Probe = () => React.createElement("p", { "data-testid": "visible" }, String(useThreadChipVisible({ threadId: "t" })));
+    const probe = renderSlot({ component: Probe }, {}, { rpc: { threadIssue: async () => ({
+      binding: null, suggestion: null, alternates: [], historyCount: 0, active: [], activeCount: 0, history: [], revision: 0,
+    }) } });
+    // Loading, then nothing bound: no segment, so bb draws no empty card.
+    expect(probe.getByTestId("visible").textContent).toBe("false");
+    await waitFor(() => expect(probe.getByTestId("visible").textContent).toBe("false"));
+    // A bound thread shows it.
+    const bound = renderSlot({ component: () => React.createElement("p", { "data-testid": "bound" },
+      String(useThreadChipVisible({ threadId: "t" }))) }, {}, { rpc: { threadIssue: async () => {
+        const entry = (await import("../src/thread-issues.js")).threadIssuesFor({ threadIds: ["t"], store, suggestions: new Map() }).t!;
+        return { ...entry, history: [], historyCount: 0, revision: 1, alternates: [] };
+      } } });
+    await waitFor(() => expect(bound.getByTestId("bound").textContent).toBe("true"));
+    slot.unmount?.();
   });
 });
