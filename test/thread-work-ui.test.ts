@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { installTestPluginRuntime, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { createTestStore, issue, NOW, state, team } from "./helpers/store.js";
 import { threadIssuesFor, threadWorkBinding } from "../src/thread-issues.js";
@@ -89,12 +89,17 @@ describe("thread work UI", () => {
   it("hides the chip's context segment while it has nothing to say", async () => {
     const { slot, store } = fixture();
     const Probe = () => React.createElement("p", { "data-testid": "visible" }, String(useThreadChipVisible({ threadId: "t" })));
-    const probe = renderSlot({ component: Probe }, {}, { rpc: { threadIssue: async () => ({
-      binding: null, suggestion: null, alternates: [], historyCount: 0, active: [], activeCount: 0, history: [], revision: 0,
-    }) } });
-    // Loading, then nothing bound: no segment, so bb draws no empty card.
+    let answered = false;
+    const probe = renderSlot({ component: Probe }, {}, { rpc: { threadIssue: async () => {
+      answered = true;
+      return { binding: null, suggestion: null, alternates: [], historyCount: 0, active: [], activeCount: 0, history: [], revision: 0 };
+    } } });
+    // Loading: no segment.
     expect(probe.getByTestId("visible").textContent).toBe("false");
-    await waitFor(() => expect(probe.getByTestId("visible").textContent).toBe("false"));
+    // Answered with nothing bound: still no segment, so bb draws no empty card.
+    await waitFor(() => expect(answered).toBe(true));
+    await act(async () => {});
+    expect(probe.getByTestId("visible").textContent).toBe("false");
     // A bound thread shows it.
     const bound = renderSlot({ component: () => React.createElement("p", { "data-testid": "bound" },
       String(useThreadChipVisible({ threadId: "t" }))) }, {}, { rpc: { threadIssue: async () => {
