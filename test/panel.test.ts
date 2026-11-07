@@ -691,4 +691,48 @@ describe("buildWorkingSet", () => {
     const unstarted = view.buckets.find((bucket) => bucket.id === "assigned-unstarted");
     expect(unstarted?.rows.map((row) => row.id).sort()).toEqual(["m1", "m2"]);
   });
+
+  it("keeps other people's issues with bb work on them when the team has more open issues than the row limit", () => {
+    // Running, PR needs you and In progress are about work on this machine,
+    // whoever the issue is assigned to. A low-priority issue with a running
+    // thread, a pull request waiting on review, or a checked-out branch sits
+    // past the team's top rows and must still reach its bucket.
+    const store = createTestStore();
+    store.putTeams([team("team_eng", "ENG", { name: "Engineering" })], NOW);
+    store.replaceWorkflowStates("team_eng", [state("s_todo", "team_eng", "unstarted", 1, "Todo")]);
+    store.putMembers([member("u_me", "Ada Lovelace", true), member("u_other", "Somebody")]);
+    store.replacePriorityValues([{ priority: 0, label: "No priority" }]);
+    store.putIssues(
+      [
+        ...Array.from({ length: PANEL_ROW_LIMIT + 10 }, (_, index) =>
+          issue({ id: `o${index}`, stateId: "s_todo", assigneeId: "u_other", priority: 1 }),
+        ),
+        issue({ id: "run", stateId: "s_todo", assigneeId: "u_other", priority: 0 }),
+        issue({ id: "pr", stateId: "s_todo", assigneeId: "u_other", priority: 0 }),
+        issue({ id: "branch", stateId: "s_todo", assigneeId: null, priority: 0 }),
+      ],
+      NOW,
+    );
+    store.linkThread({ threadId: "t_run", issueId: "run", teamId: "team_eng", projectId: "p", createdAt: NOW, origin: "manual" });
+    const pr = { prUrl: null, prState: "open", appliedStateId: null, appliedAt: null, lastSeenAt: NOW };
+    store.putPrState({ environmentId: "env_pr", issueId: "pr", prNumber: 7, prAttention: "review_requested", ...pr });
+    store.putPrState({ environmentId: "env_branch", issueId: "branch", prNumber: null, prAttention: null, ...pr, prState: null });
+    const view = buildWorkingSet(
+      {
+        store,
+        now: () => NOW,
+        hasCredential: true,
+        boundTeamIds: ["team_eng"],
+        backfilledTeamIds: new Set(["team_eng"]),
+        notice: null,
+        bbFacts: new Map([["run", "thread-running"]]),
+      },
+      null,
+    );
+    if (view.kind !== "buckets") throw new Error("expected buckets");
+    const bucket = (id: string) => view.buckets.find((entry) => entry.id === id)?.rows.map((row) => row.id);
+    expect(bucket("running")).toEqual(["run"]);
+    expect(bucket("pr-needs-you")).toEqual(["pr"]);
+    expect(bucket("started-no-pr")).toEqual(["branch"]);
+  });
 });

@@ -404,12 +404,12 @@ export function buildRowViews(deps: PanelDeps, issues: readonly IssueRow[]): Iss
 }
 
 /**
- * Two priority-sorted issue lists as one, without duplicates, in the store's
+ * Priority-sorted issue lists as one, without duplicates, in the store's
  * own "priority" order: 1..4 first, None (0) last, then most recently updated.
  */
-function mergeByPriority(a: readonly IssueRow[], b: readonly IssueRow[]): IssueRow[] {
+function mergeByPriority(...lists: readonly (readonly IssueRow[])[]): IssueRow[] {
   const byId = new Map<string, IssueRow>();
-  for (const issue of [...a, ...b]) byId.set(issue.id, issue);
+  for (const issue of lists.flat()) byId.set(issue.id, issue);
   const rank = (priority: number) => (priority === 0 ? 5 : priority);
   return [...byId.values()].sort(
     (x, y) => rank(x.priority) - rank(y.priority) || (y.updatedAt ?? 0) - (x.updatedAt ?? 0),
@@ -433,7 +433,10 @@ export function buildWorkingSet(deps: PanelDeps, team: string | null): WorkingSe
   // The team's top rows alone are not enough. On a team with more open issues
   // than the row limit, the viewer's own low-priority work sits past the cut,
   // and "Assigned to you, never started" showed 5 of 41. So the viewer's open
-  // issues are fetched on their own and merged in, in the same order.
+  // issues are fetched on their own and merged in, in the same order. The
+  // same goes for issues with bb work on this machine (a thread, a branch, a
+  // pull request): Running, PR needs you and In progress are about that work
+  // whoever the issue is assigned to, and it is a handful of rows.
   const viewerId = deps.store.viewer()?.id ?? null;
   const teamIssues = deps.store.queryIssues({ teamIds, sort: "priority", limit: PANEL_ROW_LIMIT });
   const viewerIssues =
@@ -445,7 +448,13 @@ export function buildWorkingSet(deps: PanelDeps, team: string | null): WorkingSe
           sort: "priority",
           limit: PANEL_ROW_LIMIT,
         });
-  const issues = mergeByPriority(teamIssues, viewerIssues);
+  const bbWorkIssues = deps.store.queryIssues({
+    teamIds,
+    withBbWork: true,
+    sort: "priority",
+    limit: PANEL_ROW_LIMIT,
+  });
+  const issues = mergeByPriority(teamIssues, viewerIssues, bbWorkIssues);
   const issueIds = issues.map((issue) => issue.id);
 
   const states = new Map<string, WorkflowStateRow>();
