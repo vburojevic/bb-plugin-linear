@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 560" width="1280" height="560" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" role="img" aria-label="A bb window with Linear in place: the issue list in the sidebar, the thread's issue ENG-101 above the composer, and that issue open in the side panel">
+  <style>
+    .grow { animation: grow 1.6s cubic-bezier(.3,.6,.3,1) .5s both; }
+    @keyframes grow { from { stroke-dasharray: 0 99 } }
+    .ping { animation: ping 1.4s ease-out 1.6s both; transform-box: fill-box; transform-origin: center; }
+    @keyframes ping { 0% { opacity: 0; transform: scale(.9) } 30% { opacity: .9 } 100% { opacity: 0; transform: scale(1.12) } }
+    @media (prefers-reduced-motion: reduce) { .grow, .ping { animation: none } .ping { opacity: 0 } }
+  </style>
+  <rect x="40" y="40" width="1200" height="480" rx="18" fill="none" stroke="#3d444d" stroke-width="2"/>
+  <line x1="40" y1="84" x2="1240" y2="84" stroke="#3d444d" stroke-width="2"/>
+<circle cx="68" cy="62" r="6" fill="#3d444d"/><circle cx="90" cy="62" r="6" fill="#3d444d"/><circle cx="112" cy="62" r="6" fill="#3d444d"/>
+  <line x1="300" y1="84" x2="300" y2="520" stroke="#3d444d" stroke-width="2"/>
+  <svg x="62" y="102" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e6edf3" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3Z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/><path d="m3 17.5 9 5 9-5" opacity=".0"/></svg>
+  <text x="88" y="116" font-size="15" font-weight="600" fill="#e6edf3">Linear</text>
+  <rect x="60" y="134" width="220" height="28" rx="7" fill="#262c36"/>
+  <rect x="63" y="137" width="88" height="22" rx="5" fill="#151b23" stroke="#3d444d"/>
+  <text x="107" y="152" font-size="11.5" font-weight="600" fill="#e6edf3" text-anchor="middle">Working set</text>
+  <text x="178" y="152" font-size="11.5" fill="#9198a1" text-anchor="middle">Inbox</text>
+  <text x="240" y="152" font-size="11.5" fill="#9198a1" text-anchor="middle">All issues</text>
+  <text x="62" y="188" font-size="10.5" font-weight="600" fill="#9198a1" letter-spacing=".2">PR needs you</text>
+  <circle cx="70" cy="208" r="6.5" fill="none" stroke="#3fb950" stroke-width="1.6"/><circle cx="70" cy="208" r="2.00" fill="none" stroke="#3fb950" stroke-width="4.00" stroke-dasharray="9.42 12.57" transform="rotate(-90 70 208)"/>
+  <text x="84" y="212" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#9198a1">ENG-103</text>
+  <rect x="146" y="203" width="120" height="8" rx="4" fill="#262c36"/>
+  <text x="62" y="242" font-size="10.5" font-weight="600" fill="#9198a1" letter-spacing=".2">In progress, no PR</text>
+  <circle cx="70" cy="262" r="6.5" fill="none" stroke="#e3b341" stroke-width="1.6"/><circle cx="70" cy="262" r="2.00" fill="none" stroke="#e3b341" stroke-width="4.00" stroke-dasharray="6.28 12.57" transform="rotate(-90 70 262)"/>
+  <text x="84" y="266" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#9198a1">ENG-101</text>
+  <rect x="146" y="257" width="130" height="8" rx="4" fill="#262c36"/>
+  <circle cx="70" cy="292" r="6.5" fill="none" stroke="#e3b341" stroke-width="1.6"/><circle cx="70" cy="292" r="2.00" fill="none" stroke="#e3b341" stroke-width="4.00" stroke-dasharray="6.28 12.57" transform="rotate(-90 70 292)"/>
+  <text x="84" y="296" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#9198a1">ENG-102</text>
+  <rect x="146" y="287" width="104" height="8" rx="4" fill="#262c36"/>
+  <circle cx="70" cy="322" r="6.5" fill="none" stroke="#6e7681" stroke-width="1.6"/>
+  <text x="84" y="326" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#9198a1">ENG-104</text>
+  <rect x="146" y="317" width="116" height="8" rx="4" fill="#262c36"/>
+  <text x="62" y="356" font-size="10.5" font-weight="600" fill="#9198a1" letter-spacing=".2">Assigned to you, never started</text>
+  <circle cx="70" cy="376" r="6.5" fill="none" stroke="#6e7681" stroke-width="1.6"/>
+  <text x="84" y="380" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#9198a1">ENG-106</text>
+  <rect x="146" y="371" width="96" height="8" rx="4" fill="#262c36"/>
+  <circle cx="70" cy="406" r="6.5" fill="none" stroke="#6e7681" stroke-width="1.6" stroke-dasharray="2 2.2"/>
+  <text x="84" y="410" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#9198a1">ENG-110</text>
+  <rect x="146" y="401" width="112" height="8" rx="4" fill="#262c36"/>
+  <rect x="330" y="104" width="220" height="8" rx="4" fill="#262c36"/>
+  <line x1="300" y1="132" x2="900" y2="132" stroke="#3d444d" stroke-width="2"/>
+  <rect x="620" y="156" width="250" height="40" rx="12" fill="#262c36"/>
+  <rect x="330" y="224" width="420" height="8" rx="4" fill="#262c36"/>
+  <rect x="330" y="250" width="360" height="8" rx="4" fill="#262c36"/>
+  <rect x="330" y="276" width="300" height="8" rx="4" fill="#262c36"/>
+  <rect x="330" y="336" width="540" height="40" rx="10" fill="none" stroke="#3d444d" stroke-width="1.5"/>
+  <rect class="ping" x="338" y="343" width="120" height="26" rx="6" fill="#2e2a12"/>
+  <circle cx="356" cy="356" r="7.5" fill="none" stroke="#e3b341" stroke-width="1.6"/><circle class="grow" cx="356" cy="356" r="2.50" fill="none" stroke="#e3b341" stroke-width="5.00" stroke-dasharray="7.85 15.71" transform="rotate(-90 356 356)"/>
+  <text x="372" y="361" font-size="13.5" font-weight="600" fill="#e3b341">ENG-101</text>
+  <text x="433" y="361" font-size="13.5" fill="#9198a1">+1</text>
+  <line x1="468" y1="346" x2="468" y2="366" stroke="#3d444d" stroke-width="1.5"/>
+  <svg x="480" y="348" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M6 8.5v7"/><path d="M18 15.5V11a3 3 0 0 0-3-3h-4"/></svg>
+  <text x="502" y="361" font-size="13.5" fill="#9198a1">#57</text>
+  <rect x="330" y="388" width="540" height="102" rx="14" fill="none" stroke="#e6edf3" stroke-width="2"/>
+  <rect x="356" y="414" width="230" height="8" rx="4" fill="#262c36"/>
+  <line x1="900" y1="84" x2="900" y2="520" stroke="#3d444d" stroke-width="2"/>
+  <text x="926" y="116" font-size="11.5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#e3b341">ENG-101</text>
+  <text x="984" y="116" font-size="11.5" fill="#9198a1">Engineering</text>
+  <text x="926" y="146" font-size="15" font-weight="600" fill="#e6edf3">Retry uploads after a</text>
+  <text x="926" y="166" font-size="15" font-weight="600" fill="#e6edf3">dropped connection</text>
+  <rect x="926" y="182" width="112" height="28" rx="7" fill="none" stroke="#3d444d" stroke-width="1.5"/>
+  <circle cx="943" cy="196" r="6.5" fill="none" stroke="#e3b341" stroke-width="1.6"/><circle cx="943" cy="196" r="2.00" fill="none" stroke="#e3b341" stroke-width="4.00" stroke-dasharray="6.28 12.57" transform="rotate(-90 943 196)"/>
+  <text x="956" y="200" font-size="12" fill="#e6edf3">In Progress</text>
+  <rect x="1046" y="185" width="46" height="22" rx="11" fill="#3c1618"/>
+  <circle cx="1058" cy="196" r="3" fill="#f85149"/>
+  <text x="1066" y="200" font-size="11.5" fill="#f85149">Bug</text>
+  <line x1="914" y1="226" x2="1226" y2="226" stroke="#3d444d" stroke-width="1.5"/>
+  <rect x="926" y="244" width="270" height="7" rx="3.5" fill="#262c36"/>
+  <rect x="926" y="264" width="240" height="7" rx="3.5" fill="#262c36"/>
+  <rect x="926" y="284" width="180" height="7" rx="3.5" fill="#262c36"/>
+  <line x1="914" y1="318" x2="1226" y2="318" stroke="#3d444d" stroke-width="1.5"/>
+  <text x="926" y="344" font-size="11" fill="#9198a1" letter-spacing=".3">Assignee</text>
+  <rect x="1012" y="336" width="70" height="8" rx="4" fill="#262c36"/>
+  <text x="926" y="370" font-size="11" fill="#9198a1" letter-spacing=".3">Priority</text>
+  <rect x="1012" y="362" width="56" height="8" rx="4" fill="#262c36"/>
+  <text x="926" y="396" font-size="11" fill="#9198a1" letter-spacing=".3">Project</text>
+  <rect x="1012" y="388" width="92" height="8" rx="4" fill="#262c36"/>
+  <text x="926" y="422" font-size="11" fill="#9198a1" letter-spacing=".3">Cycle</text>
+  <rect x="1012" y="414" width="64" height="8" rx="4" fill="#262c36"/>
+  <line x1="914" y1="448" x2="1226" y2="448" stroke="#3d444d" stroke-width="1.5"/>
+  <text x="926" y="472" font-size="11" font-weight="600" fill="#9198a1" letter-spacing=".3">Activity</text>
+  <circle cx="934" cy="494" r="8" fill="#262c36"/><rect x="950" y="490" width="200" height="8" rx="4" fill="#262c36"/>
+</svg>
